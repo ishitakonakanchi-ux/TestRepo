@@ -24,9 +24,7 @@ def simulator(params):
     #y = 3 * params[0] * np.sin(x) + params[1] * x ** 2 - 2 * params[2] * x
     #y += np.random.randn(len(x))
     #return y
-    b = params[0]
-    duration = params[1]
-    rp_rs = params[2]
+    b, duration, rp_rs = params
     
     orbit = TransitOrbit(
         period=TRUE_PERIOD,
