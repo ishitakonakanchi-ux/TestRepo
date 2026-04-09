@@ -1,76 +1,103 @@
-import os
-import argparse
 import numpy as np
-import jax.numpy as jnp #added import
-from ili.dataloaders import StaticNumpyLoader
-from ili.inference import InferenceRunner
-from ili.validation import ValidationRunner
-from jaxoplanet.orbits import TransitOrbit #added import
-from jaxoplanet.light_curves import limb_dark_light_curve #added import
+import jax.numpy as jnp
+from jaxoplanet.orbits import TransitOrbit
+from jaxoplanet.light_curves import limb_dark_light_curve
+from ili.utils import Uniform
 
-TRUE_PERIOD = 3.0           # orbital period [days] (fixed) 
-TRUE_T0 = 0.0              # mid-transit time [days] (fixed)
-TRUE_U = [0.3, 0.2]        # quadratic limb darkening coefficients (fixed)
-SIGMA = 5e-4  
-#above variables taken from TransitMCMC1 directly
+from npe_wrapper import NPEEstimator
 
-num_sims = 500 # changed from 200, previous toy value
-t_obs = jnp.linspace(-0.2, 0.2, 200) #TransitMCMC1
+# Fixed transit parameters
+TRUE_PERIOD = 3.0           # orbital period [days]
+TRUE_T0 = 0.0               # mid-transit time [days]
+TRUE_U = [0.3, 0.2]         # quadratic limb darkening coefficients
+SIGMA = 5e-4                # Gaussian noise std on flux
+
+# Observation grid: 200 time points in [-0.2, 0.2] days around mid-transit
+N_OBS = 200
+t_obs = jnp.linspace(-0.2, 0.2, N_OBS)
+
+# Prior bounds for the 3 inferred parameters
+#   b       ~ Uniform(0, 1)      impact parameter [dimensionless]
+#   duration ~ Uniform(0.01, 0.5) transit duration [days]
+#   rp_rs   ~ Uniform(0.01, 0.3) planet-to-star radius ratio [dimensionless]
+PRIOR_LOW = [0.0, 0.01, 0.01]
+PRIOR_HIGH = [1.0, 0.5, 0.3]
+PARAM_LABELS = ["b", "duration", "rp_rs"]
 
 
 def simulator(params):
-    # create toy simulations
-    #x = np.arange(10)
-    #y = 3 * params[0] * np.sin(x) + params[1] * x ** 2 - 2 * params[2] * x
-    #y += np.random.randn(len(x))
-    #return y
+    """Simulate a noisy transit light curve.
+
+    Parameters
+    ----------
+    params : array (3,)
+        [b, duration, rp_rs] — impact parameter, transit duration [days],
+        and planet-to-star radius ratio.
+
+    Returns
+    -------
+    flux : array (N_OBS,)
+        Noisy relative flux evaluated at `t_obs`.
+    """
     b, duration, rp_rs = params
-    
+
     orbit = TransitOrbit(
         period=TRUE_PERIOD,
         duration=duration,
         time_transit=TRUE_T0,
         impact_param=b,
-        radius_ratio=rp_rs,)
-    flux = 1.0 + limb_dark_light_curve(orbit, TRUE_U)(t_obs) #t_obs instead of t
-    flux = np.random.normal(0, SIGMA, len(t_obs)) + flux # noise
+        radius_ratio=rp_rs,
+    )
+    flux = 1.0 + limb_dark_light_curve(orbit, TRUE_U)(t_obs)
+    flux = flux + np.random.normal(0, SIGMA, N_OBS)
     return np.array(flux)
 
 
-if __name__ == '__main__':
-    # parse arguments
-    parser = argparse.ArgumentParser(
-        description="Run SBI inference for transit data.")
-    parser.add_argument(
-        "--model", type=str,
-        default="NPE",
-        help="Configuration file to use for model training.")
-    args = parser.parse_args()
+def simulate_dataset(n_sims):
+    """Draw parameters from the prior and simulate light curves.
 
-    # construct a working directory
-    if not os.path.isdir("transit"):
-        os.mkdir("transit")
+    Parameters
+    ----------
+    n_sims : int
+        Number of simulations.
 
-    # simulate data and save as numpy files
-    #theta = np.random.rand(200, 3)  # 200 simulations, 3 parameters
-    theta = np.array([np.random.uniform(0.0,  1.0,  num_sims), #b
-        np.random.uniform(0.01, 0.5,  num_sims), #duration
-        np.random.uniform(0.01, 0.3,  num_sims)#rp_rs
-    ]).T
+    Returns
+    -------
+    theta : array (n_sims, 3)
+        Sampled parameters [b, duration, rp_rs].
+    x : array (n_sims, N_OBS)
+        Simulated noisy light curves.
+    """
+    theta = np.column_stack([
+        np.random.uniform(PRIOR_LOW[i], PRIOR_HIGH[i], n_sims)
+        for i in range(3)
+    ])
     x = np.array([simulator(t) for t in theta])
-    np.save("transit/theta.npy", theta)
-    np.save("transit/x.npy", x)
+    return theta, x
 
-    # reload all simulator examples as a dataloader
-    all_loader = StaticNumpyLoader.from_config("configs/data/transit.yaml")
 
-    # train a model to infer x -> theta. save it as toy/posterior.pkl
-    runner = InferenceRunner.from_config(
-        f"configs/infer/transit_sbi_{args.model}.yaml")
-    runner(loader=all_loader)
+if __name__ == "__main__":
+    n_sims = 500
 
-    # use the trained posterior model to predict on a single example from
-    # the test set
-    val_runner = ValidationRunner.from_config(
-        f"configs/val/transit_sbi_{args.model}.yaml")
-    val_runner(loader=all_loader)
+    # Simulate training data: theta (500, 3), x (500, 200)
+    theta, x = simulate_dataset(n_sims)
+
+    prior = Uniform(low=PRIOR_LOW, high=PRIOR_HIGH, device="cpu")
+
+    # Train NPE
+    npe = NPEEstimator(
+        model="maf",
+        hidden_features=50,
+        num_transforms=5,
+        learning_rate=5e-4,
+        batch_size=50,
+        stop_after_epochs=20,
+    )
+    npe.fit(theta, x, prior)
+
+    # Sample posterior for the first simulated observation
+    # x_obs: (200,) -> samples: (10000, 3)
+    samples = npe.sample(x[0], n_samples=10_000)
+    print(f"Posterior samples shape: {samples.shape}")
+    print(f"True params: {theta[0]}")
+    print(f"Posterior mean: {samples.mean(axis=0)}")
