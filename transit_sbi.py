@@ -1,5 +1,7 @@
 import numpy as np
 import jax.numpy as jnp
+
+from jax import jit
 from jaxoplanet.orbits import TransitOrbit
 from jaxoplanet.light_curves import limb_dark_light_curve
 from ili.utils import Uniform
@@ -24,7 +26,7 @@ PRIOR_LOW = [0.0, 0.01, 0.01]
 PRIOR_HIGH = [1.0, 0.5, 0.3]
 PARAM_LABELS = ["b", "duration", "rp_rs"]
 
-
+@jit
 def simulator(params):
     """Simulate a noisy transit light curve.
 
