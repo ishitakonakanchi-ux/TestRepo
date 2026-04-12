@@ -10,13 +10,14 @@ Example: train an NPE on transit light curves and inspect the posterior.
 
 import numpy as np
 import matplotlib.pyplot as plt
+import emcee
 import corner
 
 from ili.utils import Uniform
 from npe_wrapper import NPEEstimator
 from transit_sbi import (
     simulate_dataset, simulator, t_obs,
-    PRIOR_LOW, PRIOR_HIGH, PARAM_LABELS,
+    PRIOR_LOW, PRIOR_HIGH, PARAM_LABELS, SIGMA,
 )
 
 # ── 1. Simulate training data and train ──────────────────────────────────
@@ -68,6 +69,51 @@ fig.savefig("posterior_corner.png", dpi=150, bbox_inches="tight")
 #    corner.corner(mcmc_samples, fig=fig, color="C2",
 #                  hist_kwargs={"density": True})
 
+
+def log_prior_MCMC(theta):
+    b, duration, rp_rs = theta
+    if (PRIOR_LOW[0] <= b        <= PRIOR_HIGH[0] and
+        PRIOR_LOW[1] <= duration <= PRIOR_HIGH[1] and
+        PRIOR_LOW[2] <= rp_rs    <= PRIOR_HIGH[2]):
+        return 0.0
+    return -np.inf
+
+def log_likelihood_MCMC(theta):
+    model = simulator(theta)
+    return -0.5 * np.sum(
+        ((x_obs_A - model) / SIGMA)**2
+    )
+
+def log_posterior_MCMC(theta):
+    lp = log_prior_MCMC(theta)
+    if not np.isfinite(lp):
+        return -np.inf
+    return lp + log_likelihood_MCMC(theta)
+
+
+ndim     = 3
+nwalkers = 32
+nsteps   = 5000 # Took this from TransitMCMC1 code
+nburn    = 1000
+
+
+p0 = true_A + 1e-3 * np.random.normal(
+     size=(nwalkers, ndim))
+sampler = emcee.EnsembleSampler(nwalkers, ndim, log_posterior_MCMC)
+sampler.run_mcmc(p0, nsteps, progress=True)
+flat_samples = sampler.get_chain(discard=nburn, flat=True)
+print("Done.") # TransitMCMC1 code
+
+# Corner Plot of MCMC - NPE
+fig = corner.corner(samples_A, labels=PARAM_LABELS, 
+                    truths=true_A, color="C0", hist_kwargs={"density": True})
+corner.corner(samples_B, fig=fig, truths=true_B, color="C1", 
+              hist_kwargs={"density": True})
+corner.corner(flat_samples, fig=fig, color="C2",
+                   hist_kwargs={"density": True})
+
+fig.savefig("posterior_corner_vs_mcmc.png", dpi=150, bbox_inches="tight")
+
 # ── 5. Posterior predictive light curves ─────────────────────────────────
 t_np = np.array(t_obs)
 fig, ax = plt.subplots()
@@ -89,11 +135,11 @@ fig.savefig("posterior_predictive.png", dpi=150, bbox_inches="tight")
 # 1. Pick a fixed observation to evaluate on (e.g. x_obs_A above).
 #
 # 2. Loop over a range of training set sizes:
-#        for n in [100, 200, 500, 1000, 2000]:
-#            theta_n, x_n = simulate_dataset(n_sims=n)
-#            npe_n = NPEEstimator(...)
-#            npe_n.fit(theta_n, x_n, prior)
-#            samples_n = npe_n.sample(x_obs_A, n_samples=10_000)
+        for n in [100, 200, 500, 1000, 2000]:
+            theta_n, x_n = simulate_dataset(n_sims=n)
+            npe_n = NPEEstimator(...)
+            npe_n.fit(theta_n, x_n, prior)
+            samples_n = npe_n.sample(x_obs_A, n_samples=10_000)
 #
 # 3. Compare the posteriors. Some options:
 #    - Overlay corner plots for each n (different colours) and check
