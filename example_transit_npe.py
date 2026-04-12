@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import emcee
 import corner
 
+from jax import jit
 from ili.utils import Uniform
 from npe_wrapper import NPEEstimator
 from transit_sbi import (
@@ -70,6 +71,7 @@ fig.savefig("posterior_corner.png", dpi=150, bbox_inches="tight")
 #                  hist_kwargs={"density": True})
 
 
+@jit
 def log_prior_MCMC(theta):
     b, duration, rp_rs = theta
     if (PRIOR_LOW[0] <= b        <= PRIOR_HIGH[0] and
@@ -78,12 +80,14 @@ def log_prior_MCMC(theta):
         return 0.0
     return -np.inf
 
+@jit
 def log_likelihood_MCMC(theta):
     model = simulator(theta)
     return -0.5 * np.sum(
         ((x_obs_A - model) / SIGMA)**2
     )
 
+@jit
 def log_posterior_MCMC(theta):
     lp = log_prior_MCMC(theta)
     if not np.isfinite(lp):
@@ -135,11 +139,11 @@ fig.savefig("posterior_predictive.png", dpi=150, bbox_inches="tight")
 # 1. Pick a fixed observation to evaluate on (e.g. x_obs_A above).
 #
 # 2. Loop over a range of training set sizes:
-        for n in [100, 200, 500, 1000, 2000]:
-            theta_n, x_n = simulate_dataset(n_sims=n)
-            npe_n = NPEEstimator(...)
-            npe_n.fit(theta_n, x_n, prior)
-            samples_n = npe_n.sample(x_obs_A, n_samples=10_000)
+#        for n in [100, 200, 500, 1000, 2000]:
+#            theta_n, x_n = simulate_dataset(n_sims=n)
+#            npe_n = NPEEstimator(...)
+#            npe_n.fit(theta_n, x_n, prior)
+#            samples_n = npe_n.sample(x_obs_A, n_samples=10_000)
 #
 # 3. Compare the posteriors. Some options:
 #    - Overlay corner plots for each n (different colours) and check
