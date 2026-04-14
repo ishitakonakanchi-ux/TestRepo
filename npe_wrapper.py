@@ -104,6 +104,7 @@ class NPEEstimator:
         self.device = device
 
         self.posterior_ = None
+        self.posteriors_ = []  # For ensemble
         self.summaries_ = None
 
     def _build_net(self, theta_sample, x_sample):
@@ -237,8 +238,9 @@ class NPEEstimator:
                 train=train_losses[-1], val=val_losses[-1],
                 lr=optimizer.param_groups[0]["lr"])
 
-            # Early stopping
-            if val_loss < best_val_loss:
+            # Early stopping (require meaningful improvement)
+            min_delta = 1e-4
+            if val_loss < best_val_loss - min_delta:
                 best_val_loss = val_loss
                 epochs_without_improvement = 0
                 best_state = {k: v.clone()
@@ -259,6 +261,51 @@ class NPEEstimator:
                             "validation_loss": val_losses}]
         return self
 
+    def fit_online_ensemble(self, simulate_fn, sigma, prior, n_sims_per_epoch,
+                            n_epochs, patience=20, n_ensemble=3, base_seed=42):
+        """Train an ensemble of NPEs with different random seeds.
+
+        Parameters
+        ----------
+        simulate_fn, sigma, prior, n_sims_per_epoch, n_epochs, patience :
+            Same as fit_online.
+        n_ensemble : int
+            Number of networks to train.
+        base_seed : int
+            Base random seed (each network uses base_seed + i).
+
+        Returns
+        -------
+        self
+        """
+        import copy
+        self.posteriors_ = []
+        self.summaries_ = []
+
+        for i in range(n_ensemble):
+            print(f"\n=== Training ensemble member {i+1}/{n_ensemble} ===")
+            seed = base_seed + i
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+
+            # Create fresh embedding net for each member
+            embedding_copy = copy.deepcopy(self.embedding_net)
+
+            # Temporarily swap and train
+            original_embedding = self.embedding_net
+            self.embedding_net = embedding_copy
+            self.fit_online(simulate_fn, sigma, prior, n_sims_per_epoch,
+                           n_epochs, patience)
+            self.embedding_net = original_embedding
+
+            # Store results
+            self.posteriors_.append(self.posterior_)
+            self.summaries_.extend(self.summaries_)
+            self.posterior_ = None  # Clear single posterior
+
+        print(f"\nEnsemble training complete: {n_ensemble} networks")
+        return self
+
     def sample(self, x_obs, n_samples=10_000, show_progress_bars=True):
         """Draw posterior samples given an observation.
 
@@ -276,13 +323,25 @@ class NPEEstimator:
         samples : array (n_samples, n_params)
             Posterior samples.
         """
+        x_tensor = torch.as_tensor(
+            np.asarray(x_obs, dtype=np.float32)).unsqueeze(0).to(self.device)
+
+        # Ensemble: sample equally from each posterior
+        if self.posteriors_:
+            samples_per = n_samples // len(self.posteriors_)
+            all_samples = []
+            for post in self.posteriors_:
+                s = post.sample((samples_per,), x=x_tensor,
+                                show_progress_bars=show_progress_bars).cpu().numpy()
+                all_samples.append(s)
+            return np.concatenate(all_samples, axis=0)
+
+        # Single posterior
         if self.posterior_ is None:
             raise RuntimeError("Call fit() before sample().")
-        x_tensor = torch.as_tensor(
-            np.asarray(x_obs, dtype=np.float32)).unsqueeze(0)
         return self.posterior_.sample(
             (n_samples,), x=x_tensor,
-            show_progress_bars=show_progress_bars).numpy()
+            show_progress_bars=show_progress_bars).cpu().numpy()
 
     def log_prob(self, theta, x_obs):
         """Evaluate log-posterior at given parameter values.
@@ -299,30 +358,43 @@ class NPEEstimator:
         log_p : array (n_eval,)
             Log-posterior values.
         """
-        if self.posterior_ is None:
+        if self.posterior_ is None and not self.posteriors_:
             raise RuntimeError("Call fit() before log_prob().")
         x_tensor = torch.as_tensor(
-            np.asarray(x_obs, dtype=np.float32)).unsqueeze(0)
+            np.asarray(x_obs, dtype=np.float32)).unsqueeze(0).to(self.device)
         theta_tensor = torch.as_tensor(
-            np.asarray(theta, dtype=np.float32))
+            np.asarray(theta, dtype=np.float32)).to(self.device)
+
+        if self.posteriors_:
+            # Average log probs across ensemble
+            log_probs = []
+            for post in self.posteriors_:
+                lp = post.log_prob(theta_tensor, x=x_tensor).cpu().numpy()
+                log_probs.append(lp)
+            return np.mean(log_probs, axis=0)
+
         return self.posterior_.log_prob(
-            theta_tensor, x=x_tensor).numpy()
+            theta_tensor, x=x_tensor).cpu().numpy()
 
     def save(self, path):
-        """Save the trained posterior to a pickle file.
+        """Save the trained posterior(s) to a pickle file.
 
         Parameters
         ----------
         path : str
             Output file path.
         """
-        if self.posterior_ is None:
+        if self.posteriors_:
+            with open(path, "wb") as f:
+                pickle.dump(self.posteriors_, f)
+        elif self.posterior_ is not None:
+            with open(path, "wb") as f:
+                pickle.dump(self.posterior_, f)
+        else:
             raise RuntimeError("Call fit() before save().")
-        with open(path, "wb") as f:
-            pickle.dump(self.posterior_, f)
 
     def load(self, path):
-        """Load a previously trained posterior from a pickle file.
+        """Load previously trained posterior(s) from a pickle file.
 
         Parameters
         ----------
@@ -334,5 +406,9 @@ class NPEEstimator:
         self
         """
         with open(path, "rb") as f:
-            self.posterior_ = pickle.load(f)
+            loaded = pickle.load(f)
+        if isinstance(loaded, list):
+            self.posteriors_ = loaded
+        else:
+            self.posterior_ = loaded
         return self

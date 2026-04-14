@@ -71,7 +71,7 @@ The NPE uses:
 ## Configuration
 
 In `train_sbi.py`:
-- `DEVICE = "cpu"` or `"cuda"` for GPU acceleration
+- `DEVICE` auto-detects: CUDA → MPS → CPU
 - `SEED = 42` for reproducibility
 
 ## Google Colab
@@ -87,10 +87,9 @@ A test notebook `colab_test.ipynb` is included - upload it to Colab to verify th
 # JAX is pre-installed on Colab with CUDA support
 !pip install -q sbi jaxoplanet emcee corner
 
-# Clone and setup
+# Clone repo (device auto-detected)
 !git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
 %cd YOUR_REPO
-!sed -i 's/DEVICE = "cpu"/DEVICE = "cuda"/' train_sbi.py
 
 # Train
 !python train_sbi.py
@@ -118,9 +117,8 @@ token = getpass("GitHub token: ")
 os.environ["GH_TOKEN"] = token
 !git clone https://$GH_TOKEN@github.com/YOUR_USERNAME/YOUR_REPO.git
 %cd YOUR_REPO
-!sed -i 's/DEVICE = "cpu"/DEVICE = "cuda"/' train_sbi.py
 
-# Train
+# Train (device auto-detected)
 !python train_sbi.py
 
 # Inference
@@ -139,8 +137,7 @@ weights = sorted(glob.glob("weights/npe_*.pkl"))[-1]
 # JAX is pre-installed on Colab with CUDA support
 !pip install -q sbi jaxoplanet emcee corner
 
-# Enable GPU and train
-!sed -i 's/DEVICE = "cpu"/DEVICE = "cuda"/' train_sbi.py
+# Train (device auto-detected)
 !python train_sbi.py
 
 # Inference

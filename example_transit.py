@@ -2,11 +2,13 @@
 Example: load a trained NPE and inspect posteriors.
 
 Usage:
-    python example_transit.py weights/npe_2026-04-14_15h30m.pkl
+    python example_transit.py [weights_file]
 
+If no weights file is specified, uses the most recent model in weights/.
 Requires running train_sbi.py first.
 """
 
+import glob
 import os
 import sys
 import pickle
@@ -39,12 +41,17 @@ PLOT_DIR = "plots"
 os.makedirs(PLOT_DIR, exist_ok=True)
 
 # ── Parse arguments ──────────────────────────────────────────────────────
-if len(sys.argv) != 2:
-    print("Usage: python example_transit.py <weights_file>")
-    print("Example: python example_transit.py weights/npe_2026-04-14_15h30m.pkl")
-    sys.exit(1)
+if len(sys.argv) == 2:
+    model_fname = sys.argv[1]
+else:
+    # Find the most recent model in weights/
+    candidates = glob.glob("weights/npe_*.pkl")
+    if not candidates:
+        print("No model files found in weights/. Run train_sbi.py first.")
+        sys.exit(1)
+    model_fname = max(candidates, key=os.path.getmtime)
+    print(f"Using latest model: {model_fname}")
 
-model_fname = sys.argv[1]
 summary_fname = model_fname.replace("npe_", "summary_")
 
 if not os.path.exists(model_fname):
