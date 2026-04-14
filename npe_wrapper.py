@@ -409,6 +409,11 @@ class NPEEstimator:
             loaded = pickle.load(f)
         if isinstance(loaded, list):
             self.posteriors_ = loaded
+            # Get device from first posterior's neural net
+            self.device = str(next(
+                self.posteriors_[0].posterior_estimator.parameters()).device)
         else:
             self.posterior_ = loaded
+            self.device = str(next(
+                self.posterior_.posterior_estimator.parameters()).device)
         return self

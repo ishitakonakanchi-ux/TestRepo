@@ -86,8 +86,8 @@ if __name__ == "__main__":
 
     npe = NPEEstimator(
         model="maf",
-        hidden_features=128,
-        num_transforms=8,
+        hidden_features=256,
+        num_transforms=10,
         learning_rate=1e-3,
         batch_size=512,
         stop_after_epochs=50,
@@ -101,7 +101,7 @@ if __name__ == "__main__":
             sigma=SIGMA,
             prior=prior,
             n_sims_per_epoch=10000,
-            n_epochs=1000,
+            n_epochs=2000,
             patience=100,
             n_ensemble=N_ENSEMBLE,
             base_seed=SEED,
@@ -112,7 +112,7 @@ if __name__ == "__main__":
             sigma=SIGMA,
             prior=prior,
             n_sims_per_epoch=10000,
-            n_epochs=1000,
+            n_epochs=2000,
             patience=100,
         )
 
