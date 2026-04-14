@@ -1,12 +1,9 @@
 import numpy as np
 import jax.numpy as jnp
 
-from jax import jit
+from jax import jit, vmap
 from jaxoplanet.orbits import TransitOrbit
 from jaxoplanet.light_curves import limb_dark_light_curve
-from ili.utils import Uniform
-
-from npe_wrapper import NPEEstimator
 
 # Fixed transit parameters
 TRUE_PERIOD = 3.0           # orbital period [days]
@@ -14,21 +11,21 @@ TRUE_T0 = 0.0               # mid-transit time [days]
 TRUE_U = [0.3, 0.2]         # quadratic limb darkening coefficients
 SIGMA = 5e-4                # Gaussian noise std on flux
 
-# Observation grid: 200 time points in [-0.2, 0.2] days around mid-transit
-N_OBS = 200
+# Observation grid: 50 time points in [-0.2, 0.2] days around mid-transit
+N_OBS = 50
 t_obs = jnp.linspace(-0.2, 0.2, N_OBS)
 
 # Prior bounds for the 3 inferred parameters
 #   b       ~ Uniform(0, 1)      impact parameter [dimensionless]
 #   duration ~ Uniform(0.01, 0.5) transit duration [days]
 #   rp_rs   ~ Uniform(0.01, 0.3) planet-to-star radius ratio [dimensionless]
-PRIOR_LOW = [0.0, 0.01, 0.01]
-PRIOR_HIGH = [1.0, 0.5, 0.3]
+PRIOR_LOW = [0.0, 0.05, 0.03]
+PRIOR_HIGH = [0.9, 0.35, 0.25]
 PARAM_LABELS = ["b", "duration", "rp_rs"]
 
 @jit
 def simulator(params):
-    """Simulate a noisy transit light curve.
+    """Simulate a noiseless transit light curve.
 
     Parameters
     ----------
@@ -39,7 +36,7 @@ def simulator(params):
     Returns
     -------
     flux : array (N_OBS,)
-        Noisy relative flux evaluated at `t_obs`.
+        Noiseless relative flux evaluated at `t_obs`.
     """
     b, duration, rp_rs = params
 
@@ -50,56 +47,67 @@ def simulator(params):
         impact_param=b,
         radius_ratio=rp_rs,
     )
-    flux = 1.0 + limb_dark_light_curve(orbit, TRUE_U)(t_obs)
-    flux = flux + np.random.normal(0, SIGMA, N_OBS)
-    return np.array(flux)
+    return 1.0 + limb_dark_light_curve(orbit, TRUE_U)(t_obs)
 
 
-def simulate_dataset(n_sims):
+simulator_batch = jit(vmap(simulator))
+
+
+def simulate_dataset(n_sims, noiseless=False):
     """Draw parameters from the prior and simulate light curves.
 
     Parameters
     ----------
     n_sims : int
         Number of simulations.
+    noiseless : bool
+        If True, return noiseless light curves (for use with on-the-fly
+        noise augmentation).
 
     Returns
     -------
     theta : array (n_sims, 3)
         Sampled parameters [b, duration, rp_rs].
     x : array (n_sims, N_OBS)
-        Simulated noisy light curves.
+        Simulated light curves (noiseless if requested).
     """
     theta = np.column_stack([
         np.random.uniform(PRIOR_LOW[i], PRIOR_HIGH[i], n_sims)
         for i in range(3)
     ])
-    x = np.array([simulator(t) for t in theta])
+    x = np.asarray(simulator_batch(jnp.array(theta)))
+    if not noiseless:
+        x = x + np.random.normal(0, SIGMA, x.shape)
     return theta, x
 
 
-if __name__ == "__main__":
-    n_sims = 500
+def augment_noise(theta, x_noiseless, sigma, n_augmentations):
+    """Replicate noiseless simulations with independent noise draws.
 
-    # Simulate training data: theta (500, 3), x (500, 200)
-    theta, x = simulate_dataset(n_sims)
+    Mimics on-the-fly noise augmentation (Zhang+2020) within sbi's
+    constraint of loading all data at once: each noiseless light curve
+    is replicated `n_augmentations` times with a fresh noise realization,
+    effectively multiplying the training set size.
 
-    prior = Uniform(low=PRIOR_LOW, high=PRIOR_HIGH, device="cpu")
+    Parameters
+    ----------
+    theta : array (n_sims, n_params)
+        Original parameter samples.
+    x_noiseless : array (n_sims, n_obs)
+        Noiseless light curves.
+    sigma : float
+        Gaussian noise standard deviation.
+    n_augmentations : int
+        Number of noise realizations per simulation.
 
-    # Train NPE
-    npe = NPEEstimator(
-        model="maf",
-        hidden_features=50,
-        num_transforms=5,
-        learning_rate=5e-4,
-        batch_size=50,
-        stop_after_epochs=20,
-    )
-    npe.fit(theta, x, prior)
-
-    # Sample posterior for the first simulated observation
-    # x_obs: (200,) -> samples: (10000, 3)
-    samples = npe.sample(x[0], n_samples=10_000)
-    print(f"Posterior samples shape: {samples.shape}")
-    print(f"True params: {theta[0]}")
-    print(f"Posterior mean: {samples.mean(axis=0)}")
+    Returns
+    -------
+    theta_aug : array (n_sims * n_augmentations, n_params)
+        Tiled parameters.
+    x_aug : array (n_sims * n_augmentations, n_obs)
+        Noisy light curves with independent noise draws.
+    """
+    theta_aug = np.tile(theta, (n_augmentations, 1))
+    x_aug = np.tile(x_noiseless, (n_augmentations, 1))
+    x_aug = x_aug + np.random.normal(0, sigma, x_aug.shape)
+    return theta_aug, x_aug
