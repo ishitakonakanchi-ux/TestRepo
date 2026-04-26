@@ -31,6 +31,50 @@ from sbi.inference.posteriors import DirectPosterior
 from sbi.utils import BoxUniform
 
 
+def _prior_to_cpu(prior):
+    """Return a CPU copy of a BoxUniform / Independent(Uniform) prior.
+
+    sbi's ``BoxUniform`` is ``Independent(Uniform(low, high))``. Reconstructing
+    it on CPU is cheaper and safer than mutating the live distribution.
+    Falls back to the original prior if its structure is unrecognised.
+    """
+    base = getattr(prior, "base_dist", None)
+    low = getattr(base, "low", None)
+    high = getattr(base, "high", None)
+    if low is None or high is None:
+        return prior
+    return BoxUniform(low=low.detach().cpu(), high=high.detach().cpu())
+
+
+def _sample_on_cpu(posterior, n_samples, x_tensor_cpu, show_progress_bars):
+    """Sample from a DirectPosterior with everything pinned to CPU.
+
+    Avoids an sbi bug where rejection sampling against the prior's support
+    raises ``Expected all tensors to be on the same device`` when the
+    posterior was trained on MPS. Restores the original device on exit so
+    later calls (e.g. log_prob on GPU) are unaffected.
+    """
+    net = posterior.posterior_estimator
+    orig_device = next(net.parameters()).device
+    orig_prior = posterior.prior
+    orig_post_device = getattr(posterior, "_device", None)
+
+    net.to("cpu")
+    posterior.prior = _prior_to_cpu(orig_prior)
+    if orig_post_device is not None:
+        posterior._device = "cpu"
+    try:
+        out = posterior.sample(
+            (n_samples,), x=x_tensor_cpu,
+            show_progress_bars=show_progress_bars).cpu().numpy()
+    finally:
+        net.to(orig_device)
+        posterior.prior = orig_prior
+        if orig_post_device is not None:
+            posterior._device = orig_post_device
+    return out
+
+
 class NPEEstimator:
     """Sklearn-like wrapper for Neural Posterior Estimation via sbi.
 
@@ -323,25 +367,29 @@ class NPEEstimator:
         samples : array (n_samples, n_params)
             Posterior samples.
         """
+        # Sampling is forced onto CPU. sbi's DirectPosterior.sample uses
+        # rejection sampling against the prior's support; on MPS this triggers
+        # a device-mismatch (mps:0 vs cpu) inside torch's constraint check
+        # because sbi mixes CPU and device tensors internally. CPU sampling
+        # avoids this and is fast for the small flows used here.
         x_tensor = torch.as_tensor(
-            np.asarray(x_obs, dtype=np.float32)).unsqueeze(0).to(self.device)
+            np.asarray(x_obs, dtype=np.float32)).unsqueeze(0).cpu()
 
         # Ensemble: sample equally from each posterior
         if self.posteriors_:
             samples_per = n_samples // len(self.posteriors_)
             all_samples = []
             for post in self.posteriors_:
-                s = post.sample((samples_per,), x=x_tensor,
-                                show_progress_bars=show_progress_bars).cpu().numpy()
+                s = _sample_on_cpu(post, samples_per, x_tensor,
+                                   show_progress_bars)
                 all_samples.append(s)
             return np.concatenate(all_samples, axis=0)
 
         # Single posterior
         if self.posterior_ is None:
             raise RuntimeError("Call fit() before sample().")
-        return self.posterior_.sample(
-            (n_samples,), x=x_tensor,
-            show_progress_bars=show_progress_bars).cpu().numpy()
+        return _sample_on_cpu(self.posterior_, n_samples, x_tensor,
+                              show_progress_bars)
 
     def log_prob(self, theta, x_obs):
         """Evaluate log-posterior at given parameter values.

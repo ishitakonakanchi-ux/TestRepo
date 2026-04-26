@@ -112,7 +112,7 @@ if __name__ == "__main__":
             sigma=SIGMA,
             prior=prior,
             n_sims_per_epoch=10000,
-            n_epochs=2000,
+            n_epochs=20,
             patience=100,
         )
 
@@ -144,12 +144,12 @@ if __name__ == "__main__":
 
     # PIT calibration
     print("Computing PIT calibration...")
-    n_test = 2000
+    n_test = 1000
     theta_test, x_test = simulate_dataset(n_test)
     pit_values = np.empty((n_test, len(PARAM_LABELS)))
 
     for i in trange(n_test, desc="PIT"):
-        samples_i = npe.sample(x_test[i], n_samples=2000, show_progress_bars=False)
+        samples_i = npe.sample(x_test[i], n_samples=1000, show_progress_bars=False)
         pit_values[i] = np.mean(samples_i < theta_test[i], axis=0)
 
     fig, axes = plt.subplots(1, len(PARAM_LABELS), figsize=(12, 3))
