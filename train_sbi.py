@@ -112,7 +112,7 @@ if __name__ == "__main__":
             sigma=SIGMA,
             prior=prior,
             n_sims_per_epoch=10000,
-            n_epochs=20,
+            n_epochs=2000,
             patience=100,
         )
 
