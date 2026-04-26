@@ -58,6 +58,7 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 print(f"Loading {model_fname}")
+
 npe = NPEEstimator().load(model_fname)
 
 # ── 1. Generate two synthetic observations ───────────────────────────────
