@@ -70,6 +70,7 @@ x_obs_A = np.array(simulator(true_A)) + np.random.normal(0, SIGMA, N_OBS)
 x_obs_B = np.array(simulator(true_B)) + np.random.normal(0, SIGMA, N_OBS)
 
 samples_A = npe.sample(x_obs_A, n_samples=10_000)
+
 samples_B = npe.sample(x_obs_B, n_samples=10_000)
 
 print("\nSBI posterior for observation A:")
