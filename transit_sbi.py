@@ -9,7 +9,7 @@ from jaxoplanet.light_curves import limb_dark_light_curve
 #TRUE_PERIOD = 3.0           # orbital period [days]
 #TRUE_T0 = 0.0               # mid-transit time [days]
 #TRUE_U = [0.3, 0.2]         # quadratic limb darkening coefficients
-#SIGMA = 5e-4                # Gaussian noise std on flux
+SIGMA = 5e-4                # Gaussian noise std on flux
 
 # Observation grid: 50 time points in [-0.2, 0.2] days around mid-transit
 N_OBS = 50
