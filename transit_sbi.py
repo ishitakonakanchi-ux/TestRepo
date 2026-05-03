@@ -5,11 +5,11 @@ from jax import jit, vmap
 from jaxoplanet.orbits import TransitOrbit
 from jaxoplanet.light_curves import limb_dark_light_curve
 
-# Fixed transit parameters
-TRUE_PERIOD = 3.0           # orbital period [days]
-TRUE_T0 = 0.0               # mid-transit time [days]
-TRUE_U = [0.3, 0.2]         # quadratic limb darkening coefficients
-SIGMA = 5e-4                # Gaussian noise std on flux
+# NO Fixed transit parameters
+#TRUE_PERIOD = 3.0           # orbital period [days]
+#TRUE_T0 = 0.0               # mid-transit time [days]
+#TRUE_U = [0.3, 0.2]         # quadratic limb darkening coefficients
+#SIGMA = 5e-4                # Gaussian noise std on flux
 
 # Observation grid: 50 time points in [-0.2, 0.2] days around mid-transit
 N_OBS = 50
@@ -19,9 +19,9 @@ t_obs = jnp.linspace(-0.2, 0.2, N_OBS)
 #   b       ~ Uniform(0, 1)      impact parameter [dimensionless]
 #   duration ~ Uniform(0.01, 0.5) transit duration [days]
 #   rp_rs   ~ Uniform(0.01, 0.3) planet-to-star radius ratio [dimensionless]
-PRIOR_LOW = [0.0, 0.05, 0.03]
-PRIOR_HIGH = [0.9, 0.35, 0.25]
-PARAM_LABELS = ["b", "duration", "rp_rs"]
+PRIOR_LOW = [0.0, 0.05, 0.03, 2.0, -0.15, 0.0, 0.0]
+PRIOR_HIGH = [0.9, 0.35, 0.25, 4.0, 0.15, 0.5, 0.5]
+PARAM_LABELS = ["b", "duration", "rp_rs", "period", "t0", "u1", "u2"]
 
 @jit
 def simulator(params):
@@ -29,7 +29,7 @@ def simulator(params):
 
     Parameters
     ----------
-    params : array (3,)
+    params : array (3,) 
         [b, duration, rp_rs] — impact parameter, transit duration [days],
         and planet-to-star radius ratio.
 
@@ -38,16 +38,16 @@ def simulator(params):
     flux : array (N_OBS,)
         Noiseless relative flux evaluated at `t_obs`.
     """
-    b, duration, rp_rs = params
+    b, duration, rp_rs, period, t0, u1, u2 = params
 
     orbit = TransitOrbit(
-        period=TRUE_PERIOD,
+        period=period,
         duration=duration,
-        time_transit=TRUE_T0,
+        time_transit=t0,
         impact_param=b,
         radius_ratio=rp_rs,
     )
-    return 1.0 + limb_dark_light_curve(orbit, TRUE_U)(t_obs)
+    return 1.0 + limb_dark_light_curve(orbit, [u1, u2])(t_obs)
 
 
 simulator_batch = jit(vmap(simulator))
@@ -73,7 +73,7 @@ def simulate_dataset(n_sims, noiseless=False):
     """
     theta = np.column_stack([
         np.random.uniform(PRIOR_LOW[i], PRIOR_HIGH[i], n_sims)
-        for i in range(3)
+        for i in range(7)
     ])
     x = np.asarray(simulator_batch(jnp.array(theta)))
     if not noiseless:
