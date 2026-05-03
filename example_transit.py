@@ -63,8 +63,8 @@ print(f"Loading {model_fname}")
 npe = NPEEstimator().load(model_fname)
 
 # ── 1. Generate two synthetic observations ───────────────────────────────
-true_A = np.array([0.35, 0.15, 0.10])  # low impact, short duration
-true_B = np.array([0.55, 0.25, 0.17])  # moderate impact, longer duration
+true_A = np.array([0.35, 0.15, 0.10, 2.5, 0.0, 0.3, 0.2])  # low impact, short duration
+true_B = np.array([0.55, 0.25, 0.17, 3.5, 0.05, 0.4, 0.3])  # moderate impact, longer duration
 
 x_obs_A = np.array(simulator(true_A)) + np.random.normal(0, SIGMA, N_OBS)
 x_obs_B = np.array(simulator(true_B)) + np.random.normal(0, SIGMA, N_OBS)
@@ -116,7 +116,7 @@ def make_log_posterior(x_obs):
     return log_posterior
 
 
-ndim, nwalkers, nsteps, nburn = 3, 32, 25000, 5000
+ndim, nwalkers, nsteps, nburn = 7, 32, 20000, 4000 #25000 to 20000, 5000 to 4000
 
 # MCMC for observation A
 print("\nRunning MCMC for observation A...")
