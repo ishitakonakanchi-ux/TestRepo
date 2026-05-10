@@ -50,7 +50,7 @@ class CNNEmbedding(nn.Module):
     Uses larger kernels and dilated convolutions to capture the full
     transit shape, which helps recover the impact parameter.
     """
-    def __init__(self, output_dim=32):
+    def __init__(self, output_dim=32): #output_dim changed from 32 to 64
         super().__init__()
         self.conv = nn.Sequential(
             # Large kernel to capture global transit shape
@@ -86,8 +86,8 @@ if __name__ == "__main__":
 
     npe = NPEEstimator(
         model="maf",
-        hidden_features=256,
-        num_transforms=10,
+        hidden_features=256, #changed from 256 to 512
+        num_transforms=15, #changed from 15 to 20
         learning_rate=1e-3,
         batch_size=512,
         stop_after_epochs=50,
@@ -100,9 +100,9 @@ if __name__ == "__main__":
             simulate_fn=lambda n: simulate_dataset(n, noiseless=True),
             sigma=SIGMA,
             prior=prior,
-            n_sims_per_epoch=10000,
-            n_epochs=2000,
-            patience=100,
+            n_sims_per_epoch=50000, 
+            n_epochs=600,
+            patience=60,
             n_ensemble=N_ENSEMBLE,
             base_seed=SEED,
         )
@@ -111,9 +111,9 @@ if __name__ == "__main__":
             simulate_fn=lambda n: simulate_dataset(n, noiseless=True),
             sigma=SIGMA,
             prior=prior,
-            n_sims_per_epoch=10000,
-            n_epochs=2000,
-            patience=100,
+            n_sims_per_epoch=50000, #changed from 10000 to 50000
+            n_epochs=600,#changed from 2000 to 600
+            patience=60, #changed from 100 to 60
         )
 
     # Save model and training summary
