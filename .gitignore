@@ -2,3 +2,4 @@ plots/
 weights/
 __pycache__/
 sbi-logs/
+data/

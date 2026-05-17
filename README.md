@@ -21,10 +21,53 @@ Fixed parameters: orbital period (3 days), quadratic limb darkening [0.3, 0.2].
 ## Installation
 
 ```bash
-pip install sbi jax jaxoplanet emcee corner torch numpy matplotlib
+pip install sbi jax jaxoplanet emcee corner torch numpy matplotlib astropy
 ```
 
 ## Usage
+
+### 0. Build good Kepler DR25 light curves
+
+Use the official Kepler DR25 Data Validation time-series products, not local
+PDCSAP preprocessing.
+The builder downloads DR25 `*_dvt.fits` files, keeps only TCEs that pass the
+current quality filters, bins each accepted curve to the 50-point SBI grid, and
+stores empirical heteroscedastic errors.
+
+```bash
+/Users/rstiskalek/Projects/Teaching/venv_teach/bin/python build_dr25_dv_library.py
+```
+
+Main outputs:
+
+- `data/dr25_dv_library/selected_tces.csv`
+- `data/dr25_dv_library/manifest.csv`
+- `data/dr25_dv_library/dr25_dv_sbi_library.npz`
+- `data/dr25_dv_library/curves/*_sbi_grid.csv`
+- `plots/dr25_dv_library_overview.png`
+- `plots/dr25_dv_library_errors.png`
+
+By default the script walks through the DR25 TCE catalogue by decreasing model
+SNR and keeps the first 20 accepted objects.
+It rejects matched KOI false positives, significant odd/even mismatches, and
+folded curves whose binned DV flux is inconsistent with the DR25 DV transit
+model.
+Rejected objects remain in `manifest.csv`; only accepted curves enter the CSV,
+NPZ, and plots.
+Uncached FITS downloads show a per-file progress bar.
+
+Useful options:
+
+```bash
+# Build more accepted curves
+/Users/rstiskalek/Projects/Teaching/venv_teach/bin/python build_dr25_dv_library.py --max-targets 100
+
+# Build from already-cached FITS files only
+/Users/rstiskalek/Projects/Teaching/venv_teach/bin/python build_dr25_dv_library.py --no-download
+
+# Try a planet-like subset
+/Users/rstiskalek/Projects/Teaching/venv_teach/bin/python build_dr25_dv_library.py --max-depth-ppm 50000
+```
 
 ### 1. Train the NPE
 
@@ -60,6 +103,8 @@ Plots saved to `plots/`.
 | `npe_wrapper.py` | Sklearn-like wrapper around sbi's NPE |
 | `train_sbi.py` | Training script |
 | `example_transit.py` | Inference and diagnostic plots |
+| `build_dr25_dv_library.py` | Build accepted, binned Kepler DR25 DV light curves |
+| `next_steps.md` | Handoff notes for the DR25 DV data and SBI next steps |
 
 ## Architecture
 
