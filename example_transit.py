@@ -106,11 +106,11 @@ def log_prior_MCMC(theta):
     return jnp.where(in_bounds, 0.0, -jnp.inf)
 
 
-def make_log_posterior(x_obs):
+def make_log_posterior(x_obs, t_grid=None):
     @jit
     def log_posterior(theta):
         lp = log_prior_MCMC(theta)
-        model = simulator(theta)
+        model = simulator(theta, t_grid)
         ll = -0.5 * jnp.sum(((x_obs - model) / SIGMA)**2)
         return jnp.where(jnp.isfinite(lp), lp + ll, -jnp.inf)
     return log_posterior
@@ -181,6 +181,71 @@ ax.legend()
 fname = os.path.join(PLOT_DIR, "posterior_predictive.png")
 print(f"Saving {fname}")
 fig.savefig(fname, dpi=150, bbox_inches="tight")
+
+# ── 5. Kepler observation ───────────────────────────────────────────
+print("\nLoading real Kepler data...")
+library = np.load(
+    "data/dr25_dv_library/dr25_dv_sbi_library.npz",
+    allow_pickle=True)
+
+
+index = 0
+name      = library["name"][index]
+t_kep     = jnp.array(library["phase_time"][index])
+x_kep     = np.array(library["flux"][index])
+
+print(f"Running inference on: {name}")
+
+# NPE
+samples_kep = npe.sample(x_kep, n_samples=10_000) #using real flux
+print("\nNPE posterior for real Kepler planet:")
+for i, label in enumerate(PARAM_LABELS):
+    print(f"  {label}: {samples_kep[:,i].mean():.4f} "
+          f"+/- {samples_kep[:,i].std():.4f}")
+
+# MCMC
+print("\nRunning MCMC on Kepler data...")
+log_post_kep = make_log_posterior(x_kep, t_kep)
+p0_kep = np.array(PRIOR_LOW) + np.random.rand(
+    nwalkers, ndim) * (
+    np.array(PRIOR_HIGH) - np.array(PRIOR_LOW))
+sampler_kep = emcee.EnsembleSampler(nwalkers, ndim, log_post_kep)
+sampler_kep.run_mcmc(p0_kep, nsteps, progress=True)
+mcmc_samples_kep = sampler_kep.get_chain(
+    discard=nburn, thin=30, flat=True)
+
+print("\nMCMC posterior for real Kepler planet:")
+for i, label in enumerate(PARAM_LABELS): #mean and uncertainty of MCMC for Kepler data
+    print(f"  {label}: {mcmc_samples_kep[:,i].mean():.4f} "
+          f"+/- {mcmc_samples_kep[:,i].std():.4f}")
+
+#  NPE vs MCMC corner plot
+fig = corner.corner(samples_kep, labels=PARAM_LABELS,
+                    color="C0", smooth=1.0, levels=LEVELS,
+                    hist_kwargs={"density": True})
+corner.corner(mcmc_samples_kep, fig=fig, smooth=1.0, levels=LEVELS,
+              color="C2", hist_kwargs={"density": True})
+fig.legend([plt.Line2D([], [], color="C0"),
+            plt.Line2D([], [], color="C2")],
+           ["NPE", "MCMC"], loc="upper right", fontsize=12)
+fig.suptitle(f"NPE vs MCMC: {name}", fontsize=10)
+fname = os.path.join(PLOT_DIR, "kepler_npe_vs_mcmc.png")
+fig.savefig(fname, dpi=150, bbox_inches="tight")
+print(f"Saved {fname}")
+
+# posterior predictive plot
+fig, ax = plt.subplots()
+for i in range(50):
+    flux_pred = np.array(simulator(samples_kep[i], t_kep))
+    ax.plot(np.array(t_kep), flux_pred, color="C0", alpha=0.05)
+ax.plot(np.array(t_kep), x_kep, "k.", ms=4, label="Kepler data")
+ax.set_xlabel(r"$t - t_0$ [days]")
+ax.set_ylabel("Relative flux")
+ax.set_title(f"Posterior predictive: {name}")
+ax.legend()
+fname = os.path.join(PLOT_DIR, "kepler_posterior_predictive.png")
+fig.savefig(fname, dpi=150, bbox_inches="tight")
+print(f"Saved {fname}")
 
 if SHOW_FIG:
     plt.show()
