@@ -24,7 +24,7 @@ PRIOR_HIGH = [0.9, 0.35, 0.25, 4.0, 0.15, 0.5, 0.5]
 PARAM_LABELS = ["b", "duration", "rp_rs", "period", "t0", "u1", "u2"]
 
 @jit
-def simulator(params):
+def simulator(params, t_grid=None): # default t_grid if nothing
     """Simulate a noiseless transit light curve.
 
     Parameters
@@ -39,6 +39,7 @@ def simulator(params):
         Noiseless relative flux evaluated at `t_obs`.
     """
     b, duration, rp_rs, period, t0, u1, u2 = params
+    t = t_obs if t_grid is None else t_grid
 
     orbit = TransitOrbit(
         period=period,
