@@ -48,7 +48,7 @@ def simulator(params, t_grid=None): # default t_grid if nothing
         impact_param=b,
         radius_ratio=rp_rs,
     )
-    return 1.0 + limb_dark_light_curve(orbit, [u1, u2])(t_obs)
+    return 1.0 + limb_dark_light_curve(orbit, [u1, u2])(t)
 
 
 simulator_batch = jit(vmap(simulator))
