@@ -38,14 +38,25 @@ SHOW_FIG = False
 PLOT_DIR = "plots"
 os.makedirs(PLOT_DIR, exist_ok=True)
 
+#loading flux error(KIC 008112013) 
+TARGET_OBJ_IDX = 0
+_lib = np.load(
+    "data/dr25_dv_library/dr25_dv_sbi_library.npz", allow_pickle=True)
+TARGET_FLUX_ERR = np.asarray(
+    _lib["flux_err"][TARGET_OBJ_IDX], dtype=np.float32)
+TARGET_FLUX_ERR_JAX = jnp.array(TARGET_FLUX_ERR)
+print(f"Using per-point flux_err from "
+      f"{_lib['name'][TARGET_OBJ_IDX]}")
+print(f"  flux_err median: {np.median(TARGET_FLUX_ERR):.2e}")
+
 # ── Parse arguments ──────────────────────────────────────────────────────
 if len(sys.argv) == 2:
     model_fname = sys.argv[1]
 else:
-    # Find the most recent model in weights/
-    candidates = glob.glob("weights/npe_*.pkl")
+    # preferring flux error model, otherwise take latest model
+    candidates = glob.glob("weights/npe_fluxerr_*.pkl")
     if not candidates:
-        print("No model files found in weights/. Run train_sbi.py first.")
+        print("No flux error model files found in weights/. Run train_sbi.py first.")
         sys.exit(1)
     model_fname = max(candidates, key=os.path.getmtime)
     print(f"Using latest model: {model_fname}")
@@ -66,8 +77,9 @@ npe = NPEEstimator().load(model_fname)
 true_A = np.array([0.35, 0.15, 0.10, 2.5, 0.0, 0.3, 0.2])  # low impact, short duration
 true_B = np.array([0.55, 0.25, 0.17, 3.5, 0.05, 0.4, 0.3])  # moderate impact, longer duration
 
-x_obs_A = np.array(simulator(true_A)) + np.random.normal(0, SIGMA, N_OBS)
-x_obs_B = np.array(simulator(true_B)) + np.random.normal(0, SIGMA, N_OBS)
+#using real noise
+x_obs_A = np.array(simulator(true_A)) + np.random.normal(0, TARGET_FLUX_ERR, N_OBS) 
+x_obs_B = np.array(simulator(true_B)) + np.random.normal(0, TARGET_FLUX_ERR, N_OBS)
 
 samples_A = npe.sample(x_obs_A, n_samples=10_000)
 
@@ -94,7 +106,7 @@ corner.corner(samples_B, fig=fig, truths=true_B,
               hist_kwargs={"density": True})
 fig.legend([plt.Line2D([], [], color="C0"), plt.Line2D([], [], color="C1")],
            ["Observation A", "Observation B"], loc="upper right", fontsize=12)
-fname = os.path.join(PLOT_DIR, "posterior_corner.png")
+fname = os.path.join(PLOT_DIR, "posterior_corner_fluxerr.png") # renamed
 print(f"Saving {fname}")
 fig.savefig(fname, dpi=150, bbox_inches="tight")
 
@@ -105,13 +117,16 @@ def log_prior_MCMC(theta):
                         (theta <= jnp.array(PRIOR_HIGH)))
     return jnp.where(in_bounds, 0.0, -jnp.inf)
 
-
-def make_log_posterior(x_obs, t_grid=None):
+# using array of noise values onstead of SIGMA for likelihood
+def make_log_posterior(x_obs, t_grid=None, noise_array=None):
+    if noise_array is None:
+        noise_array = TARGET_FLUX_ERR_JAX
+    noise_jax = jnp.asarray(noise_array)
     @jit
     def log_posterior(theta):
         lp = log_prior_MCMC(theta)
         model = simulator(theta, t_grid)
-        ll = -0.5 * jnp.sum(((x_obs - model) / SIGMA)**2)
+        ll = -0.5 * jnp.sum(((x_obs - model) / noise_jax)**2) #change SIGMA to array of noise values
         return jnp.where(jnp.isfinite(lp), lp + ll, -jnp.inf)
     return log_posterior
 
@@ -152,7 +167,7 @@ corner.corner(mcmc_samples_A, fig=fig, smooth=1.0, levels=LEVELS,
               color="C2", hist_kwargs={"density": True})
 fig.legend([plt.Line2D([], [], color="C0"), plt.Line2D([], [], color="C2")],
            ["NPE", "MCMC"], loc="upper right", fontsize=12)
-fname = os.path.join(PLOT_DIR, "posterior_sbi_vs_mcmc_A.png")
+fname = os.path.join(PLOT_DIR, "posterior_sbi_vs_mcmc_A_fluxerr.png") #renamed
 print(f"Saving {fname}")
 fig.savefig(fname, dpi=150, bbox_inches="tight")
 
@@ -164,7 +179,7 @@ corner.corner(mcmc_samples_B, fig=fig, smooth=1.0, levels=LEVELS,
               color="C2", hist_kwargs={"density": True})
 fig.legend([plt.Line2D([], [], color="C0"), plt.Line2D([], [], color="C2")],
            ["NPE", "MCMC"], loc="upper right", fontsize=12)
-fname = os.path.join(PLOT_DIR, "posterior_sbi_vs_mcmc_B.png")
+fname = os.path.join(PLOT_DIR, "posterior_sbi_vs_mcmc_B_fluxerr.png") #renamed
 print(f"Saving {fname}")
 fig.savefig(fname, dpi=150, bbox_inches="tight")
 
@@ -178,7 +193,7 @@ ax.plot(t_np, x_obs_A, "k.", ms=2, label="Observed")
 ax.set_xlabel(r"$t - t_0$ [days]")
 ax.set_ylabel("Relative flux")
 ax.legend()
-fname = os.path.join(PLOT_DIR, "posterior_predictive.png")
+fname = os.path.join(PLOT_DIR, "posterior_predictive_fluxerr.png")#renamed
 print(f"Saving {fname}")
 fig.savefig(fname, dpi=150, bbox_inches="tight")
 
@@ -193,6 +208,7 @@ index = 0
 name      = library["name"][index]
 t_kep     = jnp.array(library["phase_time"][index])
 x_kep     = np.array(library["flux"][index])
+flux_err_kep = np.array(library["flux_err"][index]) #pulling per-point flux 
 
 print(f"Running inference on: {name}")
 
@@ -205,7 +221,7 @@ for i, label in enumerate(PARAM_LABELS):
 
 # MCMC
 print("\nRunning MCMC on Kepler data...")
-log_post_kep = make_log_posterior(x_kep, t_kep)
+log_post_kep = make_log_posterior(x_kep, t_kep, noise_array=flux_err_kep) #using real flux and flux error
 p0_kep = np.array(PRIOR_LOW) + np.random.rand(
     nwalkers, ndim) * (
     np.array(PRIOR_HIGH) - np.array(PRIOR_LOW))
@@ -229,7 +245,7 @@ fig.legend([plt.Line2D([], [], color="C0"),
             plt.Line2D([], [], color="C2")],
            ["NPE", "MCMC"], loc="upper right", fontsize=12)
 fig.suptitle(f"NPE vs MCMC: {name}", fontsize=10)
-fname = os.path.join(PLOT_DIR, "kepler_npe_vs_mcmc.png")
+fname = os.path.join(PLOT_DIR, "kepler_npe_vs_mcmc_fluxerr.png") #renamed
 fig.savefig(fname, dpi=150, bbox_inches="tight")
 print(f"Saved {fname}")
 
@@ -243,7 +259,7 @@ ax.set_xlabel(r"$t - t_0$ [days]")
 ax.set_ylabel("Relative flux")
 ax.set_title(f"Posterior predictive: {name}")
 ax.legend()
-fname = os.path.join(PLOT_DIR, "kepler_posterior_predictive.png")
+fname = os.path.join(PLOT_DIR, "kepler_posterior_predictive_fluxerr.png") # renamed
 fig.savefig(fname, dpi=150, bbox_inches="tight")
 print(f"Saved {fname}")
 
