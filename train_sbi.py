@@ -31,6 +31,20 @@ from sbi.utils import BoxUniform
 from npe_wrapper import NPEEstimator
 from transit_sbi import simulate_dataset, PRIOR_LOW, PRIOR_HIGH, SIGMA, PARAM_LABELS
 
+# per-point noise loading from Kepler data (KIC 008112013)
+TARGET_OBJ_IDX = 0
+_lib = np.load(
+    "data/dr25_dv_library/dr25_dv_sbi_library.npz", allow_pickle=True)
+TARGET_FLUX_ERR = np.asarray(
+    _lib["flux_err"][TARGET_OBJ_IDX], dtype=np.float32)
+print(f"Training noise model: per-point flux_err from "
+      f"{_lib['name'][TARGET_OBJ_IDX]}")
+print(f"  flux_err median: {np.median(TARGET_FLUX_ERR):.2e}")
+print(f"  flux_err min/max: {TARGET_FLUX_ERR.min():.2e} / "
+      f"{TARGET_FLUX_ERR.max():.2e}")
+print(f"  (replaces fixed SIGMA = {SIGMA:.2e})")
+
+
 # Auto-detect device: CUDA > MPS > CPU
 def get_device():
     if torch.cuda.is_available():
@@ -86,8 +100,8 @@ if __name__ == "__main__":
 
     npe = NPEEstimator(
         model="maf",
-        hidden_features=256, #changed from 256 to 512
-        num_transforms=15, #changed from 15 to 20
+        hidden_features=256, 
+        num_transforms=15, 
         learning_rate=1e-3,
         batch_size=512,
         stop_after_epochs=50,
@@ -98,7 +112,7 @@ if __name__ == "__main__":
     if N_ENSEMBLE > 1:
         npe.fit_online_ensemble(
             simulate_fn=lambda n: simulate_dataset(n, noiseless=True),
-            sigma=SIGMA,
+            sigma=TARGET_FLUX_ERR,
             prior=prior,
             n_sims_per_epoch=50000, 
             n_epochs=600,
@@ -109,7 +123,7 @@ if __name__ == "__main__":
     else:
         npe.fit_online(
             simulate_fn=lambda n: simulate_dataset(n, noiseless=True),
-            sigma=SIGMA,
+            sigma=TARGET_FLUX_ERR,
             prior=prior,
             n_sims_per_epoch=50000, #changed from 10000 to 50000
             n_epochs=600,#changed from 2000 to 600
@@ -120,8 +134,9 @@ if __name__ == "__main__":
     os.makedirs("weights", exist_ok=True)
     os.makedirs("plots", exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%Mm")
-    model_fname = f"weights/npe_{timestamp}.pkl"
-    summary_fname = f"weights/summary_{timestamp}.pkl"
+    #distinguishing from fixed noise model
+    model_fname = f"weights/npe_fluxerr_{timestamp}.pkl"  
+    summary_fname = f"weights/summary_fluxerr_{timestamp}.pkl"
 
     npe.save(model_fname)
     with open(summary_fname, "wb") as f:
@@ -138,7 +153,7 @@ if __name__ == "__main__":
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
     ax.legend()
-    fname = "plots/training_loss.png"
+    fname = "plots/training_loss_fluxerr.png" #renamed
     fig.savefig(fname, dpi=150, bbox_inches="tight")
     print(f"Saved {fname}")
 
@@ -159,6 +174,6 @@ if __name__ == "__main__":
         ax.set_xlabel(f"PIT({label})")
         ax.set_ylabel("Density")
         ax.set_xlim(0, 1)
-    fname = "plots/pit_calibration.png"
+    fname = "plots/pit_calibration_fluxerr.png" #renamed
     fig.savefig(fname, dpi=150, bbox_inches="tight")
     print(f"Saved {fname}")
