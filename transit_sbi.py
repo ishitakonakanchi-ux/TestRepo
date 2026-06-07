@@ -20,7 +20,7 @@ t_obs = jnp.linspace(-0.2, 0.2, N_OBS)
 #   duration ~ Uniform(0.01, 0.5) transit duration [days]
 #   rp_rs   ~ Uniform(0.01, 0.3) planet-to-star radius ratio [dimensionless]
 PRIOR_LOW = [0.0, 0.05, 0.03, 2.0, -0.15, 0.0, 0.0]
-PRIOR_HIGH = [0.9, 0.35, 0.25, 4.0, 0.15, 0.5, 0.5]
+PRIOR_HIGH = [0.9, 0.35, 0.25, 4.0, 0.15, 1.0, 1.0]
 PARAM_LABELS = ["b", "duration", "rp_rs", "period", "t0", "u1", "u2"]
 
 @jit
