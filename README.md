@@ -8,20 +8,22 @@ This project demonstrates how to use neural density estimation to infer transit 
 
 ### Parameters
 
-The model infers three parameters from a transit light curve:
+The current simulator samples seven transit parameters from a light curve:
 
 | Parameter | Symbol | Prior | Description |
 |-----------|--------|-------|-------------|
 | Impact parameter | `b` | U(0, 0.9) | Projected distance at mid-transit |
 | Transit duration | `duration` | U(0.05, 0.35) days | Total transit duration |
 | Radius ratio | `rp_rs` | U(0.03, 0.25) | Planet-to-star radius ratio |
-
-Fixed parameters: orbital period (3 days), quadratic limb darkening [0.3, 0.2].
+| Period | `period` | U(2, 4) days | Orbital period |
+| Transit-time offset | `t0` | U(-0.15, 0.15) days | Mid-transit offset on the local grid |
+| Limb darkening | `u1` | U(0, 10) | First quadratic coefficient |
+| Limb darkening | `u2` | U(0, 10) | Second quadratic coefficient |
 
 ## Installation
 
 ```bash
-pip install sbi jax jaxoplanet emcee corner torch numpy matplotlib astropy
+pip install sbi jax jaxoplanet numpyro corner torch numpy matplotlib astropy
 ```
 
 ## Usage
@@ -78,8 +80,8 @@ python train_sbi.py
 This trains a Masked Autoregressive Flow (MAF) with a CNN embedding network on simulated transit light curves. Training uses fresh simulations each epoch with on-the-fly noise augmentation.
 
 Outputs saved to `weights/`:
-- `npe_<timestamp>.pkl` - trained posterior (includes full network)
-- `summary_<timestamp>.pkl` - training/validation loss curves
+- `npe_fluxerr_<timestamp>.pkl` - trained posterior (includes full network)
+- `summary_fluxerr_<timestamp>.pkl` - training/validation loss curves
 
 ### 2. Run inference and diagnostics
 
@@ -89,11 +91,24 @@ python example_transit.py weights/npe_2026-04-14_15h30m.pkl
 
 This loads the trained model and:
 - Compares NPE posteriors for two synthetic observations
-- Validates against MCMC (emcee)
+- Validates against MCMC (NumPyro NUTS)
 - Generates posterior predictive light curves
 - Computes PIT calibration diagnostics
 
 Plots saved to `plots/`.
+
+### 3. Run NumPyro MCMC on a downloaded DR25 curve
+
+```bash
+/Users/rstiskalek/Projects/Teaching/venv_teach/bin/python run_dr25_mcmc.py --index 0
+```
+
+This runs NumPyro NUTS on one accepted, binned DR25 curve, prints the NumPyro
+summary table, saves chain samples to `data/dr25_mcmc/`, and writes a corner
+plot to `plots/`.
+Use `--scatter-mode fixed` for one fixed scatter estimated from the curve's
+`flux_err` values, or `--scatter-mode inferred` for one constant scatter
+sampled by NumPyro.
 
 ## Files
 
@@ -103,6 +118,7 @@ Plots saved to `plots/`.
 | `npe_wrapper.py` | Sklearn-like wrapper around sbi's NPE |
 | `train_sbi.py` | Training script |
 | `example_transit.py` | Inference and diagnostic plots |
+| `run_dr25_mcmc.py` | NumPyro NUTS for one downloaded DR25 curve |
 | `build_dr25_dv_library.py` | Build accepted, binned Kepler DR25 DV light curves |
 | `next_steps.md` | Handoff notes for the DR25 DV data and SBI next steps |
 
@@ -110,8 +126,8 @@ Plots saved to `plots/`.
 
 The NPE uses:
 - **Embedding network**: 1D CNN (3 conv layers) to compress the 50-point light curve into a 32-dimensional summary
-- **Density estimator**: MAF with 8 transforms and 128 hidden units
-- **Training**: Online training with 10k fresh simulations per epoch, ReduceLROnPlateau scheduler
+- **Density estimator**: MAF with 15 transforms and 256 hidden features
+- **Training**: Online training with 50k fresh simulations per epoch, ReduceLROnPlateau scheduler
 
 ## Configuration
 
@@ -130,7 +146,7 @@ A test notebook `colab_test.ipynb` is included - upload it to Colab to verify th
 ```python
 # Install dependencies (JAX with CUDA for GPU)
 # JAX is pre-installed on Colab with CUDA support
-!pip install -q sbi jaxoplanet emcee corner
+!pip install -q sbi jaxoplanet numpyro corner
 
 # Clone repo (device auto-detected)
 !git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
@@ -153,7 +169,7 @@ weights = sorted(glob.glob("weights/npe_*.pkl"))[-1]
 ```python
 # Install dependencies
 # JAX is pre-installed on Colab with CUDA support
-!pip install -q sbi jaxoplanet emcee corner
+!pip install -q sbi jaxoplanet numpyro corner
 
 # Clone private repo
 from getpass import getpass
@@ -180,7 +196,7 @@ weights = sorted(glob.glob("weights/npe_*.pkl"))[-1]
 ```python
 # Install dependencies
 # JAX is pre-installed on Colab with CUDA support
-!pip install -q sbi jaxoplanet emcee corner
+!pip install -q sbi jaxoplanet numpyro corner
 
 # Train (device auto-detected)
 !python train_sbi.py

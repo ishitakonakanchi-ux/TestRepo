@@ -18,13 +18,32 @@ logging.getLogger("jax._src.xla_bridge").setLevel(logging.WARNING)
 warnings.filterwarnings("ignore", category=UserWarning, module="sbi")
 warnings.filterwarnings("ignore", category=FutureWarning, module="arviz")
 
+MPLCONFIGDIR = os.path.join("data", "matplotlib-cache")
+PYTHON_CACHE_DIR = os.path.join("data", "python-cache")
+os.makedirs(MPLCONFIGDIR, exist_ok=True)
+os.makedirs(PYTHON_CACHE_DIR, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", os.path.abspath(MPLCONFIGDIR))
+os.environ.setdefault("XDG_CACHE_HOME", os.path.abspath(PYTHON_CACHE_DIR))
+home_cache = os.path.expanduser("~/Library/Caches")
+if not os.access(home_cache, os.W_OK):
+    local_home = os.path.abspath(os.path.join("data", "python-home"))
+    os.makedirs(os.path.join(local_home, "Library", "Caches"), exist_ok=True)
+    os.environ["HOME"] = local_home
+
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-import emcee
 import corner
+from jax import config
+
+config.update("jax_enable_x64", True)
+
+import jax
 import jax.numpy as jnp
-from jax import jit
+import numpyro
+import numpyro.distributions as dist
+from numpyro.infer import MCMC, NUTS
+from numpyro.infer.initialization import init_to_value
 
 from npe_wrapper import NPEEstimator
 from train_sbi import CNNEmbedding  # noqa: F401 (needed for pickle)
@@ -56,7 +75,9 @@ else:
     # preferring flux error model, otherwise take latest model
     candidates = glob.glob("weights/npe_fluxerr_*.pkl")
     if not candidates:
-        print("No flux error model files found in weights/. Run train_sbi.py first.")
+        candidates = glob.glob("weights/npe_*.pkl")
+    if not candidates:
+        print("No model files found in weights/. Run train_sbi.py first.")
         sys.exit(1)
     model_fname = max(candidates, key=os.path.getmtime)
     print(f"Using latest model: {model_fname}")
@@ -111,48 +132,83 @@ print(f"Saving {fname}")
 fig.savefig(fname, dpi=150, bbox_inches="tight")
 
 # ── 3. MCMC comparison for both observations ─────────────────────────────
-@jit
-def log_prior_MCMC(theta):
-    in_bounds = jnp.all((jnp.array(PRIOR_LOW) <= theta) &
-                        (theta <= jnp.array(PRIOR_HIGH)))
-    return jnp.where(in_bounds, 0.0, -jnp.inf)
+MCMC_NUM_WARMUP = 1000
+MCMC_NUM_SAMPLES = 1000
+MCMC_NUM_CHAINS = 2
+MCMC_TARGET_ACCEPT = 0.9
 
-# using array of noise values onstead of SIGMA for likelihood
-def make_log_posterior(x_obs, t_grid=None, noise_array=None):
+
+def transit_numpyro_model(x_obs, t_grid, noise_array):
+    theta = []
+    for label, low, high in zip(PARAM_LABELS, PRIOR_LOW, PRIOR_HIGH):
+        theta.append(numpyro.sample(label, dist.Uniform(low, high)))
+    theta = jnp.stack(theta)
+    model = simulator(theta, t_grid)
+    numpyro.sample("obs", dist.Normal(model, noise_array).to_event(1), obs=x_obs)
+
+
+def run_numpyro_mcmc(name, x_obs, t_grid=None, noise_array=None,
+                     init_theta=None, seed_offset=0):
     if noise_array is None:
-        noise_array = TARGET_FLUX_ERR_JAX
-    noise_jax = jnp.asarray(noise_array)
-    @jit
-    def log_posterior(theta):
-        lp = log_prior_MCMC(theta)
-        model = simulator(theta, t_grid)
-        ll = -0.5 * jnp.sum(((x_obs - model) / noise_jax)**2) #change SIGMA to array of noise values
-        return jnp.where(jnp.isfinite(lp), lp + ll, -jnp.inf)
-    return log_posterior
+        noise_array = TARGET_FLUX_ERR
+    if t_grid is None:
+        t_grid = np.asarray(t_obs)
+    if init_theta is None:
+        init_theta = 0.5 * (np.asarray(PRIOR_LOW) + np.asarray(PRIOR_HIGH))
+
+    prior_low = np.asarray(PRIOR_LOW)
+    prior_high = np.asarray(PRIOR_HIGH)
+    init_theta = np.clip(init_theta, prior_low + 1e-6, prior_high - 1e-6)
+    init_values = {
+        label: float(value) for label, value in zip(PARAM_LABELS, init_theta)
+    }
+
+    print(f"\nRunning NumPyro MCMC for {name}...")
+    kernel = NUTS(
+        transit_numpyro_model,
+        dense_mass=True,
+        target_accept_prob=MCMC_TARGET_ACCEPT,
+        init_strategy=init_to_value(values=init_values),
+    )
+    mcmc = MCMC(
+        kernel,
+        num_warmup=MCMC_NUM_WARMUP,
+        num_samples=MCMC_NUM_SAMPLES,
+        num_chains=MCMC_NUM_CHAINS,
+        chain_method="vectorized",
+        progress_bar=True,
+    )
+    mcmc.run(
+        jax.random.PRNGKey(SEED + seed_offset),
+        x_obs=jnp.asarray(x_obs),
+        t_grid=jnp.asarray(t_grid),
+        noise_array=jnp.asarray(noise_array),
+        extra_fields=("diverging", "accept_prob", "num_steps"),
+    )
+    mcmc.print_summary()
+
+    extra_fields = mcmc.get_extra_fields()
+    if "diverging" in extra_fields:
+        diverging = np.asarray(extra_fields["diverging"], dtype=bool)
+        print(f"Divergences: {int(np.sum(diverging))} / {diverging.size}")
+    if "accept_prob" in extra_fields:
+        accept_prob = np.asarray(extra_fields["accept_prob"], dtype=float)
+        print(f"Mean accept_prob: {np.nanmean(accept_prob):.3f}")
+
+    samples = mcmc.get_samples()
+    return np.column_stack([np.asarray(samples[label]) for label in PARAM_LABELS])
 
 
-ndim, nwalkers, nsteps, nburn = 7, 32, 20000, 4000 #25000 to 20000, 5000 to 4000
-
-# MCMC for observation A
-print("\nRunning MCMC for observation A...")
-log_post_A = make_log_posterior(x_obs_A)
-p0_A = true_A + 1e-3 * np.random.normal(size=(nwalkers, ndim))
-sampler_A = emcee.EnsembleSampler(nwalkers, ndim, log_post_A)
-sampler_A.run_mcmc(p0_A, nsteps, progress=True)
-mcmc_samples_A = sampler_A.get_chain(discard=nburn, thin=30, flat=True)
+mcmc_samples_A = run_numpyro_mcmc(
+    "observation A", x_obs_A, init_theta=true_A, seed_offset=1)
 
 print("\nMCMC posterior for observation A:")
 for i, label in enumerate(PARAM_LABELS):
     print(f"  {label}: true={true_A[i]:.4f}, "
           f"mean={mcmc_samples_A[:, i].mean():.4f} +/- {mcmc_samples_A[:, i].std():.4f}")
 
-# MCMC for observation B
-print("\nRunning MCMC for observation B...")
-log_post_B = make_log_posterior(x_obs_B)
-p0_B = true_B + 1e-3 * np.random.normal(size=(nwalkers, ndim))
-sampler_B = emcee.EnsembleSampler(nwalkers, ndim, log_post_B)
-sampler_B.run_mcmc(p0_B, nsteps, progress=True)
-mcmc_samples_B = sampler_B.get_chain(discard=nburn, thin=30, flat=True)
+mcmc_samples_B = run_numpyro_mcmc(
+    "observation B", x_obs_B, init_theta=true_B, seed_offset=2)
 
 print("\nMCMC posterior for observation B:")
 for i, label in enumerate(PARAM_LABELS):
@@ -220,15 +276,18 @@ for i, label in enumerate(PARAM_LABELS):
           f"+/- {samples_kep[:,i].std():.4f}")
 
 # MCMC
-print("\nRunning MCMC on Kepler data...")
-log_post_kep = make_log_posterior(x_kep, t_kep, noise_array=flux_err_kep) #using real flux and flux error
-p0_kep = np.array(PRIOR_LOW) + np.random.rand(
-    nwalkers, ndim) * (
-    np.array(PRIOR_HIGH) - np.array(PRIOR_LOW))
-sampler_kep = emcee.EnsembleSampler(nwalkers, ndim, log_post_kep)
-sampler_kep.run_mcmc(p0_kep, nsteps, progress=True)
-mcmc_samples_kep = sampler_kep.get_chain(
-    discard=nburn, thin=30, flat=True)
+init_kep = np.array([
+    0.6,
+    float(library["dv_duration_hours"][index]) / 24.0,
+    np.sqrt(float(library["dv_depth_ppm"][index]) * 1e-6),
+    float(library["dv_period_days"][index]),
+    0.0,
+    0.3,
+    0.2,
+])
+mcmc_samples_kep = run_numpyro_mcmc(
+    "Kepler data", x_kep, t_kep, noise_array=flux_err_kep,
+    init_theta=init_kep, seed_offset=3)
 
 print("\nMCMC posterior for real Kepler planet:")
 for i, label in enumerate(PARAM_LABELS): #mean and uncertainty of MCMC for Kepler data
