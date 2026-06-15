@@ -95,8 +95,8 @@ print(f"Loading {model_fname}")
 npe = NPEEstimator().load(model_fname)
 
 # ── 1. Generate two synthetic observations ───────────────────────────────
-true_A = np.array([0.35, 0.15, 0.10, 2.5, 0.0, 0.3, 0.2])  # low impact, short duration
-true_B = np.array([0.55, 0.25, 0.17, 3.5, 0.05, 0.4, 0.3])  # moderate impact, longer duration
+true_A = np.array([0.35, 0.15, 0.10, 0.3, 0.2])  # low impact, short duration
+true_B = np.array([0.55, 0.25, 0.17, 0.4, 0.3])  # moderate impact, longer duration
 
 #using real noise
 x_obs_A = np.array(simulator(true_A)) + np.random.normal(0, TARGET_FLUX_ERR, N_OBS) 
