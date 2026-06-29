@@ -112,7 +112,7 @@ if __name__ == "__main__":
     else:
         npe.fit_online(
             simulate_fn=lambda n: simulate_dataset(n, noiseless=False),
-            sigma = 0.0 #no additional noise
+            sigma = 0.0, #no additional noise
             prior=prior,
             n_sims_per_epoch=50000, 
             n_epochs=600,
