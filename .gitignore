@@ -3,3 +3,5 @@ weights/
 __pycache__/
 sbi-logs/
 data/
+.DS_Store
+explainer/

@@ -1,43 +1,31 @@
-"""
-Example: load a trained NPE and inspect posteriors.
+"""Sanity-check the trained MLE-compression NPE, then apply it to real data.
+
+Loads the latest weights/npe_mle_*.pkl and compares the amortized NPE posterior
+(compress -> flow) against reference NUTS MCMC on the full Gaussian likelihood,
+first on two in-distribution mock transits (A, B; known truth), then on one real
+Kepler DR25 target.
 
 Usage:
     python example_transit.py [weights_file]
-
-If no weights file is specified, uses the most recent model in weights/.
-Requires running train_sbi.py first.
 """
-
 import glob
-import logging
 import os
 import sys
+import logging
 import warnings
 
 logging.getLogger("jax._src.xla_bridge").setLevel(logging.WARNING)
 warnings.filterwarnings("ignore", category=UserWarning, module="sbi")
-warnings.filterwarnings("ignore", category=FutureWarning, module="arviz")
-
-MPLCONFIGDIR = os.path.join("data", "matplotlib-cache")
-PYTHON_CACHE_DIR = os.path.join("data", "python-cache")
-os.makedirs(MPLCONFIGDIR, exist_ok=True)
-os.makedirs(PYTHON_CACHE_DIR, exist_ok=True)
-os.environ.setdefault("MPLCONFIGDIR", os.path.abspath(MPLCONFIGDIR))
-os.environ.setdefault("XDG_CACHE_HOME", os.path.abspath(PYTHON_CACHE_DIR))
-home_cache = os.path.expanduser("~/Library/Caches")
-if not os.access(home_cache, os.W_OK):
-    local_home = os.path.abspath(os.path.join("data", "python-home"))
-    os.makedirs(os.path.join(local_home, "Library", "Caches"), exist_ok=True)
-    os.environ["HOME"] = local_home
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 import numpy as np
 import torch
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import corner
 from jax import config
-
 config.update("jax_enable_x64", True)
-
 import jax
 import jax.numpy as jnp
 import numpyro
@@ -46,272 +34,103 @@ from numpyro.infer import MCMC, NUTS
 from numpyro.infer.initialization import init_to_value
 
 from npe_wrapper import NPEEstimator
-from train_sbi import CNNEmbedding  # noqa: F401 (needed for pickle)
+from transit_sbi import (simulator, score_compress, t_obs,
+                         PRIOR_LOW, PRIOR_HIGH, PARAM_LABELS, N_OBS)
 
 SEED = 42
-from transit_sbi import (
-    simulator, t_obs, PRIOR_LOW, PRIOR_HIGH, PARAM_LABELS, N_OBS,
-)
-
-SHOW_FIG = False
 PLOT_DIR = "plots"
+LIBRARY = "data/dr25_dv_library/dr25_dv_sbi_library.npz"
+KEPLER_INDEX = 0
+LOW, HIGH = np.array(PRIOR_LOW), np.array(PRIOR_HIGH)
+LEVELS = 1 - np.exp(-0.5 * np.array([1, 2]) ** 2)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
 os.makedirs(PLOT_DIR, exist_ok=True)
 
+# Two in-distribution mock observations (known truth).
+# Params: [b, duration, rp_rs, q1, q2, t0, scatter]; q1,q2 are Kipping LD.
+TRUE = {
+    "A": np.array([0.35, 0.15, 0.10, 0.30, 0.40, 0.0, 2e-3]),  # low impact, short
+    "B": np.array([0.55, 0.25, 0.17, 0.50, 0.30, 0.0, 2e-3]),  # higher impact, longer
+}
 
-# ── Parse arguments ──────────────────────────────────────────────────────
+
+def run_mcmc(x_obs, init_theta, t_grid=None):
+    def model(x):
+        theta = [numpyro.sample(l, dist.Uniform(lo, hi))
+                 for l, lo, hi in zip(PARAM_LABELS, PRIOR_LOW, PRIOR_HIGH)]
+        flux = (simulator(jnp.stack(theta)) if t_grid is None
+                else simulator(jnp.stack(theta), jnp.asarray(t_grid)))
+        numpyro.sample("obs", dist.Normal(flux, theta[6]).to_event(1), obs=x)
+    init = np.clip(init_theta, LOW + 1e-6, HIGH - 1e-6)
+    kernel = NUTS(model, dense_mass=True, target_accept_prob=0.9,
+                  init_strategy=init_to_value(
+                      values=dict(zip(PARAM_LABELS, map(float, init)))))
+    mcmc = MCMC(kernel, num_warmup=1000, num_samples=1000, num_chains=2,
+                chain_method="vectorized", progress_bar=False)
+    mcmc.run(jax.random.PRNGKey(SEED), x=jnp.asarray(x_obs))
+    s = mcmc.get_samples()
+    return np.column_stack([np.asarray(s[l]) for l in PARAM_LABELS])
+
+
+def compare(name, slug, x, init, truth=None, t_grid=None):
+    """NPE vs MCMC for one observation: print tensions, save a corner plot."""
+    npe_s = npe.sample(np.array(score_compress(x)), n_samples=10_000,
+                       show_progress_bars=False)
+    mcmc_s = run_mcmc(x, init, t_grid)
+
+    print(f"\n=== {name}: {'truth vs ' if truth is not None else ''}NPE vs MCMC ===")
+    for i, lab in enumerate(PARAM_LABELS):
+        tn = abs(npe_s[:, i].mean() - mcmc_s[:, i].mean()) / np.hypot(
+            npe_s[:, i].std(), mcmc_s[:, i].std())
+        tstr = f"true {truth[i]:+.4f}   " if truth is not None else ""
+        print(f"  {lab:9s} {tstr}NPE {npe_s[:, i].mean():+.4f}+/-{npe_s[:, i].std():.4f}"
+              f"   MCMC {mcmc_s[:, i].mean():+.4f}+/-{mcmc_s[:, i].std():.4f}"
+              f"   tension {tn:.2f}s")
+
+    # Shared axis range from both sample sets, trimming the 0.5% tails so a few
+    # heavy-tail NPE samples don't stretch every panel (keeps NPE/MCMC aligned).
+    both = np.concatenate([npe_s, mcmc_s])
+    rng = [np.percentile(both[:, i], [0.5, 99.5]) for i in range(both.shape[1])]
+
+    fig = corner.corner(npe_s, labels=PARAM_LABELS, truths=truth, color="C0",
+                        truth_color="red", smooth=1.0, levels=LEVELS, range=rng,
+                        hist_kwargs={"density": True})
+    corner.corner(mcmc_s, fig=fig, color="C2", smooth=1.0, levels=LEVELS,
+                  range=rng, hist_kwargs={"density": True})
+    fig.legend([plt.Line2D([], [], color=c) for c in ("C0", "C2")],
+               ["NPE (MLE compression)", "MCMC"], loc="upper right", fontsize=12)
+    fig.suptitle(name, fontsize=11)
+    fname = f"{PLOT_DIR}/mle_{slug}.png"
+    fig.savefig(fname, dpi=150, bbox_inches="tight")
+    print(f"Saved {fname}")
+
+
+# ── Load the trained NPE ─────────────────────────────────────────────────
 if len(sys.argv) == 2:
     model_fname = sys.argv[1]
 else:
-    # preferring scatter model, otherwise take latest model
-    candidates = glob.glob("weights/npe_scatter_*.pkl")
-    if not candidates:
-        candidates = glob.glob("weights/npe_*.pkl")
-    if not candidates:
-        print("No model files found in weights/. Run train_sbi.py first.")
-        sys.exit(1)
-    model_fname = max(candidates, key=os.path.getmtime)
-    print(f"Using latest model: {model_fname}")
-
-if not os.path.exists(model_fname):
-    raise FileNotFoundError(f"Weights file not found: {model_fname}")
-
-
-# ── Load trained model ───────────────────────────────────────────────────
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-
+    cands = glob.glob("weights/npe_mle_*.pkl")
+    if not cands:
+        sys.exit("No weights/npe_mle_*.pkl found. Run train_sbi.py first.")
+    model_fname = max(cands, key=os.path.getmtime)
 print(f"Loading {model_fname}")
-
 npe = NPEEstimator().load(model_fname)
 
-# ── 1. Generate two synthetic observations ───────────────────────────────
-true_A = np.array([0.35, 0.15, 0.10, 0.3, 0.2, 0.0, 2e-3])  # low impact, short duration
-true_B = np.array([0.55, 0.25, 0.17, 0.4, 0.3, 0.0, 2e-3])  # moderate impact, longer duration
+# ── 1. Two synthetic mocks (known truth) ─────────────────────────────────
+for tag, true in TRUE.items():
+    x = np.array(simulator(true)) + np.random.normal(0, true[-1], N_OBS)
+    compare(f"Mock {tag}", f"mock_{tag}", x, init=true, truth=true)
 
-#using real noise
-x_obs_A = np.array(simulator(true_A)) + np.random.normal(0, true_A[-1], N_OBS) 
-x_obs_B = np.array(simulator(true_B)) + np.random.normal(0, true_B[-1], N_OBS)
-
-samples_A = npe.sample(x_obs_A, n_samples=10_000)
-
-samples_B = npe.sample(x_obs_B, n_samples=10_000)
-
-print("\nSBI posterior for observation A:")
-for i, label in enumerate(PARAM_LABELS):
-    print(f"  {label}: true={true_A[i]:.4f}, "
-          f"mean={samples_A[:, i].mean():.4f} +/- {samples_A[:, i].std():.4f}")
-print("\nSBI posterior for observation B:")
-for i, label in enumerate(PARAM_LABELS):
-    print(f"  {label}: true={true_B[i]:.4f}, "
-          f"mean={samples_B[:, i].mean():.4f} +/- {samples_B[:, i].std():.4f}")
-
-# Contour levels: 1-sigma and 2-sigma (68% and 95%)
-LEVELS = (1 - np.exp(-0.5 * np.array([1, 2])**2))
-
-# ── 2. Corner plot: two observations ─────────────────────────────────────
-fig = corner.corner(samples_A, labels=PARAM_LABELS, truths=true_A,
-                    color="C0", truth_color="red", smooth=1.0, levels=LEVELS,
-                    hist_kwargs={"density": True})
-corner.corner(samples_B, fig=fig, truths=true_B,
-              color="C1", truth_color="red", smooth=1.0, levels=LEVELS,
-              hist_kwargs={"density": True})
-fig.legend([plt.Line2D([], [], color="C0"), plt.Line2D([], [], color="C1")],
-           ["Observation A", "Observation B"], loc="upper right", fontsize=12)
-fname = os.path.join(PLOT_DIR, "posterior_corner_scatter.png") # renamed
-print(f"Saving {fname}")
-fig.savefig(fname, dpi=150, bbox_inches="tight")
-
-# ── 3. MCMC comparison for both observations ─────────────────────────────
-MCMC_NUM_WARMUP = 1000
-MCMC_NUM_SAMPLES = 1000
-MCMC_NUM_CHAINS = 2
-MCMC_TARGET_ACCEPT = 0.9
-
-
-def transit_numpyro_model(x_obs, t_grid): #using smapled scatter
-    theta_list = []
-    scatter_val = None
-    for label, low, high in zip(PARAM_LABELS, PRIOR_LOW, PRIOR_HIGH):
-        sample = numpyro.sample(label, dist.Uniform(low, high))
-        theta_list.append(sample)
-        if label == "scatter":
-            scatter_val = sample
-    theta = jnp.stack(theta_list)
-    model = simulator(theta, t_grid)
-    numpyro.sample("obs", dist.Normal(model, scatter_val).to_event(1), obs=x_obs)
-
-
-def run_numpyro_mcmc(name, x_obs, t_grid=None,
-                     init_theta=None, seed_offset=0):
-    if t_grid is None:
-        t_grid = np.asarray(t_obs)
-    if init_theta is None:
-        init_theta = 0.5 * (np.asarray(PRIOR_LOW) + np.asarray(PRIOR_HIGH))
-
-    prior_low = np.asarray(PRIOR_LOW)
-    prior_high = np.asarray(PRIOR_HIGH)
-    init_theta = np.clip(init_theta, prior_low + 1e-6, prior_high - 1e-6)
-    init_values = {
-        label: float(value) for label, value in zip(PARAM_LABELS, init_theta)
-    }
-
-    print(f"\nRunning NumPyro MCMC for {name}...")
-    kernel = NUTS(
-        transit_numpyro_model,
-        dense_mass=True,
-        target_accept_prob=MCMC_TARGET_ACCEPT,
-        init_strategy=init_to_value(values=init_values),
-    )
-    mcmc = MCMC(
-        kernel,
-        num_warmup=MCMC_NUM_WARMUP,
-        num_samples=MCMC_NUM_SAMPLES,
-        num_chains=MCMC_NUM_CHAINS,
-        chain_method="vectorized",
-        progress_bar=True,
-    )
-    mcmc.run(
-        jax.random.PRNGKey(SEED + seed_offset),
-        x_obs=jnp.asarray(x_obs),
-        t_grid=jnp.asarray(t_grid),
-        extra_fields=("diverging", "accept_prob", "num_steps"),
-    )
-    mcmc.print_summary()
-
-    extra_fields = mcmc.get_extra_fields()
-    if "diverging" in extra_fields:
-        diverging = np.asarray(extra_fields["diverging"], dtype=bool)
-        print(f"Divergences: {int(np.sum(diverging))} / {diverging.size}")
-    if "accept_prob" in extra_fields:
-        accept_prob = np.asarray(extra_fields["accept_prob"], dtype=float)
-        print(f"Mean accept_prob: {np.nanmean(accept_prob):.3f}")
-
-    samples = mcmc.get_samples()
-    return np.column_stack([np.asarray(samples[label]) for label in PARAM_LABELS])
-
-
-mcmc_samples_A = run_numpyro_mcmc(
-    "observation A", x_obs_A, init_theta=true_A, seed_offset=1)
-
-print("\nMCMC posterior for observation A:")
-for i, label in enumerate(PARAM_LABELS):
-    print(f"  {label}: true={true_A[i]:.4f}, "
-          f"mean={mcmc_samples_A[:, i].mean():.4f} +/- {mcmc_samples_A[:, i].std():.4f}")
-
-mcmc_samples_B = run_numpyro_mcmc(
-    "observation B", x_obs_B, init_theta=true_B, seed_offset=2)
-
-print("\nMCMC posterior for observation B:")
-for i, label in enumerate(PARAM_LABELS):
-    print(f"  {label}: true={true_B[i]:.4f}, "
-          f"mean={mcmc_samples_B[:, i].mean():.4f} +/- {mcmc_samples_B[:, i].std():.4f}")
-
-# Corner plot: SBI vs MCMC for observation A
-fig = corner.corner(samples_A, labels=PARAM_LABELS, truths=true_A,
-                    color="C0", truth_color="red", smooth=1.0, levels=LEVELS,
-                    hist_kwargs={"density": True})
-corner.corner(mcmc_samples_A, fig=fig, smooth=1.0, levels=LEVELS,
-              color="C2", hist_kwargs={"density": True})
-fig.legend([plt.Line2D([], [], color="C0"), plt.Line2D([], [], color="C2")],
-           ["NPE", "MCMC"], loc="upper right", fontsize=12)
-fname = os.path.join(PLOT_DIR, "posterior_sbi_vs_mcmc_A_scatter.png") #renamed
-print(f"Saving {fname}")
-fig.savefig(fname, dpi=150, bbox_inches="tight")
-
-# Corner plot: SBI vs MCMC for observation B
-fig = corner.corner(samples_B, labels=PARAM_LABELS, truths=true_B,
-                    color="C0", truth_color="red", smooth=1.0, levels=LEVELS,
-                    hist_kwargs={"density": True})
-corner.corner(mcmc_samples_B, fig=fig, smooth=1.0, levels=LEVELS,
-              color="C2", hist_kwargs={"density": True})
-fig.legend([plt.Line2D([], [], color="C0"), plt.Line2D([], [], color="C2")],
-           ["NPE", "MCMC"], loc="upper right", fontsize=12)
-fname = os.path.join(PLOT_DIR, "posterior_sbi_vs_mcmc_B_scatter.png") #renamed
-print(f"Saving {fname}")
-fig.savefig(fname, dpi=150, bbox_inches="tight")
-
-# ── 4. Posterior predictive light curves ─────────────────────────────────
-t_np = np.array(t_obs)
-fig, ax = plt.subplots()
-for i in range(50):
-    ax.plot(t_np, simulator(samples_A[i]), color="C0", alpha=0.05)
-ax.plot(t_np, simulator(true_A), "r-", lw=2, label="Truth")
-ax.plot(t_np, x_obs_A, "k.", ms=2, label="Observed")
-ax.set_xlabel(r"$t - t_0$ [days]")
-ax.set_ylabel("Relative flux")
-ax.legend()
-fname = os.path.join(PLOT_DIR, "posterior_predictive_scatter.png")#renamed
-print(f"Saving {fname}")
-fig.savefig(fname, dpi=150, bbox_inches="tight")
-
-# ── 5. Kepler observation ───────────────────────────────────────────
-print("\nLoading real Kepler data...")
-library = np.load(
-    "data/dr25_dv_library/dr25_dv_sbi_library.npz",
-    allow_pickle=True)
-
-
-index = 0
-name      = library["name"][index]
-t_kep     = jnp.array(library["phase_time"][index])
-x_kep     = np.array(library["flux"][index])
-
-
-print(f"Running inference on: {name}")
-
-# NPE
-samples_kep = npe.sample(x_kep, n_samples=10_000) #using real flux
-print("\nNPE posterior for real Kepler planet:")
-for i, label in enumerate(PARAM_LABELS):
-    print(f"  {label}: {samples_kep[:,i].mean():.4f} "
-          f"+/- {samples_kep[:,i].std():.4f}")
-
-# MCMC
-init_kep = np.array([
-    0.6,
-    float(library["dv_duration_hours"][index]) / 24.0,
-    np.sqrt(float(library["dv_depth_ppm"][index]) * 1e-6),
-    0.3,
-    0.2,
-    0.0,
-    5e-4,
-])
-mcmc_samples_kep = run_numpyro_mcmc(
-    "Kepler data", x_kep, t_kep, # removed noise_array
-    init_theta=init_kep, seed_offset=3)
-
-print("\nMCMC posterior for real Kepler planet:")
-for i, label in enumerate(PARAM_LABELS): #mean and uncertainty of MCMC for Kepler data
-    print(f"  {label}: {mcmc_samples_kep[:,i].mean():.4f} "
-          f"+/- {mcmc_samples_kep[:,i].std():.4f}")
-
-#  NPE vs MCMC corner plot
-fig = corner.corner(samples_kep, labels=PARAM_LABELS,
-                    color="C0", smooth=1.0, levels=LEVELS,
-                    hist_kwargs={"density": True})
-corner.corner(mcmc_samples_kep, fig=fig, smooth=1.0, levels=LEVELS,
-              color="C2", hist_kwargs={"density": True})
-fig.legend([plt.Line2D([], [], color="C0"),
-            plt.Line2D([], [], color="C2")],
-           ["NPE", "MCMC"], loc="upper right", fontsize=12)
-fig.suptitle(f"NPE vs MCMC: {name}", fontsize=10)
-fname = os.path.join(PLOT_DIR, "kepler_npe_vs_mcmc_scatter.png") #renamed
-fig.savefig(fname, dpi=150, bbox_inches="tight")
-print(f"Saved {fname}")
-
-# posterior predictive plot
-fig, ax = plt.subplots()
-for i in range(50):
-    flux_pred = np.array(simulator(samples_kep[i], t_kep))
-    ax.plot(np.array(t_kep), flux_pred, color="C0", alpha=0.05)
-ax.plot(np.array(t_kep), x_kep, "k.", ms=4, label="Kepler data")
-ax.set_xlabel(r"$t - t_0$ [days]")
-ax.set_ylabel("Relative flux")
-ax.set_title(f"Posterior predictive: {name}")
-ax.legend()
-fname = os.path.join(PLOT_DIR, "kepler_posterior_predictive_scatter.png") # renamed
-fig.savefig(fname, dpi=150, bbox_inches="tight")
-print(f"Saved {fname}")
-
-if SHOW_FIG:
-    plt.show()
+# ── 2. One real Kepler target ────────────────────────────────────────────
+lib = np.load(LIBRARY, allow_pickle=True)
+i = KEPLER_INDEX
+name = str(lib["name"][i])
+x_kep = np.asarray(lib["flux"][i])
+t_kep = np.asarray(lib["phase_time"][i])
+assert np.allclose(t_kep, np.asarray(t_obs), atol=1e-6), (
+    f"target {i} grid mismatch; rebuild library on the fixed grid")
+init_kep = np.array([0.6, float(lib["dv_duration_hours"][i]) / 24.0,
+                     np.sqrt(float(lib["dv_depth_ppm"][i]) * 1e-6),
+                     0.3, 0.2, 0.0, 5e-4])
+compare(f"Kepler {name}", "kepler", x_kep, init=init_kep, t_grid=t_kep)
