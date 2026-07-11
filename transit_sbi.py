@@ -69,6 +69,7 @@ def simulator(params, t_grid=None, period=DEFAULT_PERIOD):
 simulator_batch = jit(vmap(simulator))
 
 
+
 def simulate_dataset(n_sims, noiseless=False):
     """Draw parameters from the prior and simulate light curves."""
     theta = np.column_stack([
