@@ -9,14 +9,16 @@ Example
 >>> from npe_wrapper import NPEEstimator
 >>> import numpy as np
 >>> import torch
+>>> from sbi.utils import BoxUniform
 >>>
->>> prior = torch.distributions.Uniform(torch.zeros(2), torch.ones(2))
->>> theta = np.random.rand(500, 2)          # (n_sims, n_params)
->>> x = np.column_stack([theta[:, 0]**2,    # (n_sims, n_features)
-...                      np.sin(theta[:, 1])])
->>> npe = NPEEstimator(model="maf", hidden_features=50, num_transforms=5)
->>> npe.fit(theta, x, prior)
->>> samples = npe.sample(x[0], n_samples=5000)  # (n_samples, n_params)
+>>> prior = BoxUniform(low=torch.zeros(2), high=torch.ones(2))
+>>> def simulate(n):                         # (n_sims) -> (theta, x)
+...     th = np.random.rand(n, 2)
+...     return th, np.column_stack([th[:, 0]**2, np.sin(th[:, 1])])
+>>> npe = NPEEstimator(model="nsf", hidden_features=50, num_transforms=5)
+>>> npe.fit_online(simulate, sigma=0.01, prior=prior,
+...                n_sims_per_epoch=1000, n_epochs=100)
+>>> samples = npe.sample(np.array([0.1, 0.2]), n_samples=5000)  # (n_samples, n_params)
 """
 
 import pickle
@@ -46,13 +48,29 @@ def _prior_to_cpu(prior):
     return BoxUniform(low=low.detach().cpu(), high=high.detach().cpu())
 
 
-def _sample_on_cpu(posterior, n_samples, x_tensor_cpu, show_progress_bars):
+def _to_unbounded(theta, lo, hi):
+    """Map bounded theta in [lo, hi] to unbounded z via the logit transform."""
+    u = ((theta - lo) / (hi - lo)).clamp(1e-6, 1 - 1e-6)
+    return torch.log(u) - torch.log1p(-u)
+
+
+def _to_bounded(z, lo, hi):
+    """Inverse of _to_unbounded: map z in R back into [lo, hi]."""
+    return lo + (hi - lo) * torch.sigmoid(z)
+
+
+def _sample_on_cpu(posterior, n_samples, x_tensor_cpu, show_progress_bars,
+                   max_sampling_time=None):
     """Sample from a DirectPosterior with everything pinned to CPU.
 
     Avoids an sbi bug where rejection sampling against the prior's support
     raises ``Expected all tensors to be on the same device`` when the
     posterior was trained on MPS. Restores the original device on exit so
     later calls (e.g. log_prob on GPU) are unaffected.
+
+    ``max_sampling_time`` caps the rejection-sampling wall-clock (seconds) and
+    returns whatever was collected — a guard for targets whose flow leaks mass
+    outside the prior (very low acceptance).
     """
     net = posterior.posterior_estimator
     orig_device = next(net.parameters()).device
@@ -63,10 +81,13 @@ def _sample_on_cpu(posterior, n_samples, x_tensor_cpu, show_progress_bars):
     posterior.prior = _prior_to_cpu(orig_prior)
     if orig_post_device is not None:
         posterior._device = "cpu"
+    extra = ({} if max_sampling_time is None else
+             {"max_sampling_time": max_sampling_time,
+              "return_partial_on_timeout": True})
     try:
         out = posterior.sample(
             (n_samples,), x=x_tensor_cpu,
-            show_progress_bars=show_progress_bars).cpu().numpy()
+            show_progress_bars=show_progress_bars, **extra).cpu().numpy()
     finally:
         net.to(orig_device)
         posterior.prior = orig_prior
@@ -92,8 +113,6 @@ class NPEEstimator:
         Adam learning rate.
     batch_size : int
         Training mini-batch size.
-    stop_after_epochs : int
-        Early-stopping patience (epochs without validation improvement).
     validation_fraction : float
         Fraction of data held out for validation.
     clip_max_norm : float
@@ -120,7 +139,7 @@ class NPEEstimator:
         The embedding is trained jointly with the flow, so it learns which
         features of the light curve are informative for the parameters.
         Alternatively, hand-crafted summary statistics (transit depth,
-        duration, ingress slope, ...) can be computed before calling fit()
+        duration, ingress slope, ...) can be computed before calling fit_online()
         and passed as a lower-dimensional `x`, avoiding the need for an
         embedding network altogether.
 
@@ -132,8 +151,7 @@ class NPEEstimator:
 
     def __init__(self, model="maf", hidden_features=50, num_transforms=5,
                  num_components=6, learning_rate=5e-4,
-                 batch_size=50, stop_after_epochs=20,
-                 validation_fraction=0.1, clip_max_norm=5.0,
+                 batch_size=50, validation_fraction=0.1, clip_max_norm=5.0,
                  embedding_net=None, device="cpu"):
         self.model = model
         self.hidden_features = hidden_features
@@ -141,7 +159,6 @@ class NPEEstimator:
         self.num_components = num_components
         self.learning_rate = learning_rate
         self.batch_size = batch_size
-        self.stop_after_epochs = stop_after_epochs
         self.validation_fraction = validation_fraction
         self.clip_max_norm = clip_max_norm
         self.embedding_net = embedding_net
@@ -150,6 +167,7 @@ class NPEEstimator:
         self.posterior_ = None
         self.posteriors_ = []  # For ensemble
         self.summaries_ = None
+        self.bounds_ = None  # (low, high) if trained in unbounded logit space
 
     def _build_net(self, theta_sample, x_sample):
         """Construct the neural density estimator.
@@ -213,12 +231,25 @@ class NPEEstimator:
         -------
         self
         """
+        # If the prior is a box, learn in an unbounded (logit) space so the flow
+        # cannot place mass outside the prior -> sampling needs no rejection.
+        base = getattr(prior, "base_dist", None)
+        if base is not None and hasattr(base, "low"):
+            self.bounds_ = (base.low.detach().cpu().float(),
+                            base.high.detach().cpu().float())
+        else:
+            self.bounds_ = None
+
+        def _tf(theta_t):
+            return (theta_t if self.bounds_ is None
+                    else _to_unbounded(theta_t, *self.bounds_))
+
         # Fixed validation set (generated once, with noise)
         theta_val_np, x_val_np = simulate_fn(
             max(1, int(n_sims_per_epoch * self.validation_fraction)))
         x_val_np = x_val_np + np.random.normal(0, sigma, x_val_np.shape)
-        theta_val = torch.as_tensor(
-            np.asarray(theta_val_np, dtype=np.float32)).to(self.device)
+        theta_val = _tf(torch.as_tensor(
+            np.asarray(theta_val_np, dtype=np.float32))).to(self.device)
         x_val = torch.as_tensor(
             np.asarray(x_val_np, dtype=np.float32)).to(self.device)
 
@@ -226,7 +257,7 @@ class NPEEstimator:
         theta_init, x_init = simulate_fn(n_sims_per_epoch)
         x_init = x_init + np.random.normal(0, sigma, x_init.shape)
         net = self._build_net(
-            torch.as_tensor(np.asarray(theta_init, dtype=np.float32)),
+            _tf(torch.as_tensor(np.asarray(theta_init, dtype=np.float32))),
             torch.as_tensor(np.asarray(x_init, dtype=np.float32)),
         ).to(self.device)
 
@@ -234,7 +265,7 @@ class NPEEstimator:
             net.parameters(), lr=self.learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.7, patience=patience // 3,
-            min_lr=1e-5)
+            min_lr=1e-4)
 
         best_val_loss = float("inf")
         epochs_without_improvement = 0
@@ -246,8 +277,8 @@ class NPEEstimator:
             # Fresh training data each epoch
             theta_np, x_np = simulate_fn(n_sims_per_epoch)
             x_np = x_np + np.random.normal(0, sigma, x_np.shape)
-            theta_t = torch.as_tensor(
-                np.asarray(theta_np, dtype=np.float32))
+            theta_t = _tf(torch.as_tensor(
+                np.asarray(theta_np, dtype=np.float32)))
             x_t = torch.as_tensor(
                 np.asarray(x_np, dtype=np.float32))
 
@@ -263,9 +294,16 @@ class NPEEstimator:
                 tb, xb = tb.to(self.device), xb.to(self.device)
                 optimizer.zero_grad()
                 loss = net.loss(tb, xb).mean()
+                # Skip non-finite batches so one bad step can't NaN the weights
+                # (flows on very sharp conditionals can produce inf loss/grads).
+                if not torch.isfinite(loss):
+                    continue
                 loss.backward()
-                nn.utils.clip_grad_norm_(
+                gnorm = nn.utils.clip_grad_norm_(
                     net.parameters(), self.clip_max_norm)
+                if not torch.isfinite(gnorm):
+                    optimizer.zero_grad()
+                    continue
                 optimizer.step()
                 epoch_loss += loss.item()
                 n_batches += 1
@@ -350,7 +388,8 @@ class NPEEstimator:
         print(f"\nEnsemble training complete: {n_ensemble} networks")
         return self
 
-    def sample(self, x_obs, n_samples=10_000, show_progress_bars=True):
+    def sample(self, x_obs, n_samples=10_000, show_progress_bars=True,
+               max_sampling_time=None):
         """Draw posterior samples given an observation.
 
         Parameters
@@ -361,6 +400,10 @@ class NPEEstimator:
             Number of posterior samples.
         show_progress_bars : bool
             Whether to show sbi's internal progress bars.
+        max_sampling_time : float or None
+            Cap on rejection-sampling wall-clock in seconds; returns whatever
+            was collected. Guards against targets whose flow leaks mass outside
+            the prior (very low acceptance -> otherwise very slow).
 
         Returns
         -------
@@ -375,21 +418,69 @@ class NPEEstimator:
         x_tensor = torch.as_tensor(
             np.asarray(x_obs, dtype=np.float32)).unsqueeze(0).cpu()
 
+        # Unbounded-transform path: the flow was trained in logit space, so
+        # sample from it directly (no rejection) and map back into the box.
+        # Every sample is in-prior by construction -> 100% acceptance.
+        if self.bounds_ is not None and self.posterior_ is not None:
+            de = self.posterior_.posterior_estimator
+            orig_device = next(de.parameters()).device
+            de.to("cpu")
+            try:
+                with torch.no_grad():
+                    z = de.net.sample(n_samples, context=x_tensor)
+                z = z.reshape(-1, z.shape[-1])
+                theta = _to_bounded(z, *self.bounds_).cpu().numpy()
+            finally:
+                de.to(orig_device)
+            return theta[:n_samples]
+
         # Ensemble: sample equally from each posterior
         if self.posteriors_:
             samples_per = n_samples // len(self.posteriors_)
             all_samples = []
             for post in self.posteriors_:
                 s = _sample_on_cpu(post, samples_per, x_tensor,
-                                   show_progress_bars)
+                                   show_progress_bars, max_sampling_time)
                 all_samples.append(s)
             return np.concatenate(all_samples, axis=0)
 
         # Single posterior
         if self.posterior_ is None:
-            raise RuntimeError("Call fit() before sample().")
+            raise RuntimeError("Call fit_online() before sample().")
         return _sample_on_cpu(self.posterior_, n_samples, x_tensor,
-                              show_progress_bars)
+                              show_progress_bars, max_sampling_time)
+
+    def sample_batch(self, x_obs, n_samples=1000):
+        """Sample the posterior for a *batch* of observations in one vectorised
+        flow pass — far faster than looping ``sample`` when many posteriors are
+        needed at once (e.g. PIT / calibration).
+
+        Parameters
+        ----------
+        x_obs : array (n_obs, n_features)
+            Batch of observation vectors.
+        n_samples : int
+            Posterior samples per observation.
+
+        Returns
+        -------
+        samples : array (n_obs, n_samples, n_params)
+        """
+        if self.posterior_ is None:
+            raise RuntimeError("Call fit_online() before sample_batch().")
+        x = torch.as_tensor(np.array(x_obs, dtype=np.float32)).cpu()
+        de = self.posterior_.posterior_estimator
+        orig_device = next(de.parameters()).device
+        de.to("cpu")
+        try:
+            with torch.no_grad():
+                # nflows: context (n_obs, F) -> samples (n_obs, n_samples, D).
+                z = de.net.sample(n_samples, context=x)
+        finally:
+            de.to(orig_device)
+        if self.bounds_ is not None:
+            z = _to_bounded(z, *self.bounds_)
+        return z.cpu().numpy()
 
     def log_prob(self, theta, x_obs):
         """Evaluate log-posterior at given parameter values.
@@ -407,7 +498,7 @@ class NPEEstimator:
             Log-posterior values.
         """
         if self.posterior_ is None and not self.posteriors_:
-            raise RuntimeError("Call fit() before log_prob().")
+            raise RuntimeError("Call fit_online() before log_prob().")
         x_tensor = torch.as_tensor(
             np.asarray(x_obs, dtype=np.float32)).unsqueeze(0).to(self.device)
         theta_tensor = torch.as_tensor(
@@ -437,9 +528,10 @@ class NPEEstimator:
                 pickle.dump(self.posteriors_, f)
         elif self.posterior_ is not None:
             with open(path, "wb") as f:
-                pickle.dump(self.posterior_, f)
+                pickle.dump({"posterior": self.posterior_,
+                             "bounds": self.bounds_}, f)
         else:
-            raise RuntimeError("Call fit() before save().")
+            raise RuntimeError("Call fit_online() before save().")
 
     def load(self, path):
         """Load previously trained posterior(s) from a pickle file.
@@ -453,15 +545,32 @@ class NPEEstimator:
         -------
         self
         """
-        with open(path, "rb") as f:
-            loaded = pickle.load(f)
+        try:
+            with open(path, "rb") as f:
+                loaded = pickle.load(f)
+        except RuntimeError:
+            # Model saved on a device (MPS/CUDA) unavailable here -> remap to CPU.
+            import io
+            orig = torch.storage._load_from_bytes
+            torch.storage._load_from_bytes = lambda b: torch.load(
+                io.BytesIO(b), map_location="cpu")
+            try:
+                with open(path, "rb") as f:
+                    loaded = pickle.load(f)
+            finally:
+                torch.storage._load_from_bytes = orig
         if isinstance(loaded, list):
             self.posteriors_ = loaded
             # Get device from first posterior's neural net
             self.device = str(next(
                 self.posteriors_[0].posterior_estimator.parameters()).device)
         else:
-            self.posterior_ = loaded
+            if isinstance(loaded, dict):  # new format: posterior + bounds
+                self.posterior_ = loaded["posterior"]
+                self.bounds_ = loaded["bounds"]
+            else:                          # old format: bare posterior
+                self.posterior_ = loaded
+                self.bounds_ = None
             self.device = str(next(
                 self.posterior_.posterior_estimator.parameters()).device)
         return self

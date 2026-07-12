@@ -28,6 +28,23 @@ pip install sbi jax jaxoplanet numpyro corner torch numpy matplotlib astropy
 
 ## Usage
 
+### Quick start: the whole pipeline
+
+`run_pipeline.sh` chains the main stages end to end:
+
+```bash
+./run_pipeline.sh                 # build, train, apply (in order)
+./run_pipeline.sh train apply     # skip the library build
+./run_pipeline.sh train           # retrain only
+./run_pipeline.sh pit             # PIT calibration plot (opt-in; needs weights)
+MAX_TARGETS=30 ./run_pipeline.sh  # more DR25 targets in the build stage
+./run_pipeline.sh --help          # full stage list and options
+```
+
+Stages are `build`, `train`, `apply`, and `pit`. With no arguments it runs
+`build train apply` in order; `pit` is opt-in and never runs by default. The
+sections below document each stage individually.
+
 ### 0. Build good Kepler DR25 light curves
 
 Use the official Kepler DR25 Data Validation time-series products, not local
@@ -120,6 +137,8 @@ sampled by NumPyro.
 | `example_transit.py` | Inference and diagnostic plots |
 | `run_dr25_mcmc.py` | NumPyro NUTS for one downloaded DR25 curve |
 | `build_dr25_dv_library.py` | Build accepted, binned Kepler DR25 DV light curves |
+| `run_pipeline.sh` | One-command pipeline: `build` → `train` → `apply` (+ opt-in `pit`) |
+| `pit_plot.py` | PIT calibration diagnostic (amortized, batched) |
 | `next_steps.md` | Handoff notes for the DR25 DV data and SBI next steps |
 
 ## Architecture
