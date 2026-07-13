@@ -1,5 +1,11 @@
 # Kepler DR25 DV light curves: next steps
 
+> Current implementation: the production pipeline uses the fixed 50-bin grid.
+> Training fluxes remain simulated, while the weighted and hybrid compressors
+> mix pairs of real per-bin `flux_err` profiles, use log10 jitter, and reserve
+> 20% of the profiles for diagnostics. The variable-grid discussion below is an
+> alternative future path, not part of the recommended student workflow.
+
 The current data path uses the official Kepler DR25 Data Validation products.
 This is deliberate.
 For the first SBI application we should not clean raw or PDCSAP light curves ourselves, because that would make the project depend on a preprocessing pipeline rather than on the inference method.
@@ -28,10 +34,10 @@ It does not download raw pixels and it does not run Lightkurve detrending.
 
 ## What the script writes
 
-Run the default 20-object library with
+Run the default 50-object library with
 
 ```bash
-/Users/rstiskalek/Projects/Teaching/venv_teach/bin/python build_dr25_dv_library.py
+.venv/bin/python build_dr25_dv_library.py --max-depth-ppm 50000
 ```
 
 The main output directory is
@@ -63,11 +69,12 @@ The next run will re-download the required FITS files and rebuild the library.
 
 ## What counts as a good curve
 
-The script walks through the DR25 TCE catalogue in decreasing DR25 model SNR and keeps the first accepted objects.
-The default target count is 20, controlled by `--max-targets`.
+The script reproducibly shuffles the DR25 TCE catalogue and keeps the first accepted objects.
+The default target count is 50, controlled by `--max-targets`.
 
 A TCE is rejected if it matches any of these conditions:
 
+- there is no matching KOI candidate,
 - the matched KOI row is labelled `FALSE POSITIVE`,
 - the matched KOI row has the significant-secondary flag,
 - the odd and even transits disagree strongly,
@@ -76,7 +83,8 @@ A TCE is rejected if it matches any of these conditions:
 The last two filters are important because some high-SNR TCEs are eclipsing-binary-like signals or long-period, poorly sampled events.
 For example, `KIC 006187893 / TCE 01` and `KIC 006422170 / TCE 01` are rejected because their binned flux does not follow the official DV transit model closely enough.
 
-The final terminal summary reports how much catalogue scanning was needed, for example:
+The final terminal summary reports how much catalogue scanning was needed.
+For reference, an earlier 20-target debugging build reported:
 
 ```text
 Selected 20 accepted TCEs
@@ -123,17 +131,16 @@ flux_err = library["flux_err"]
 names = library["name"]
 ```
 
-The arrays have a fixed length of 50, but the values of `phase_time` need not be identical for every object.
-This matters for training.
-If the network sees only `flux`, it cannot know whether the 50 values cover `[-0.2, 0.2] d` or a wider automatically chosen transit window.
+The recommended production build uses the same 50 bin-centre times over
+`[-0.2, 0.2] d` for every object. Object-specific time grids are only relevant
+to the alternative variable-window experiment discussed below.
 
 ## What you should do next
 
-Start with the default 20-object library and inspect the plots.
-Then build a larger sample, for example
+Build the default 50-object library and inspect the plots:
 
 ```bash
-/Users/rstiskalek/Projects/Teaching/venv_teach/bin/python build_dr25_dv_library.py --max-targets 100
+.venv/bin/python build_dr25_dv_library.py
 ```
 
 After every rebuild, open `plots/dr25_dv_library_overview.png` and check that the accepted curves look like single transit-like events.
@@ -141,24 +148,24 @@ Also check `plots/dr25_dv_library_errors.png` and reject or investigate objects 
 You do not need to keep every DR25 TCE.
 You need a reproducible set of standard DR25 transit curves on which SBI and MCMC can be compared fairly.
 
-Use the 20-object sample for debugging only.
-Use a larger accepted sample for the first serious SBI run.
-If the larger sample contains too many deep eclipsing-binary-like events, rebuild with a planet-like depth cut, for example
+Use the old 20-object sample for debugging only.
+Use the default 50-object sample for the first serious SBI run.
+The recommended 50,000 ppm depth limit keeps the library planet-like. For an
+even shallower sample, use for example
 
 ```bash
-/Users/rstiskalek/Projects/Teaching/venv_teach/bin/python build_dr25_dv_library.py --max-targets 100 --max-depth-ppm 50000
+.venv/bin/python build_dr25_dv_library.py --max-depth-ppm 20000
 ```
 
-The first SBI experiment should use the same kind of automatically chosen grid as the DR25 data.
-The most direct version is to draw one real `phase_time` and `flux_err` vector from the accepted library for each simulation, generate a noiseless transit model on that specific `phase_time` grid, and add heteroscedastic Gaussian noise using the drawn `flux_err`.
-This means the simulated data inherit the same window sizes and bin locations as the downloaded Kepler curves.
-It also tests whether an amortised posterior estimator can learn the same approximate likelihood used by a conventional MCMC baseline.
+The first SBI experiment uses the fixed grid and geometrically mixes two
+training `flux_err` profiles for every simulated transit. This produces many
+noise shapes without using observed Kepler flux as training data.
 
 The first MCMC comparison should use exactly the same 50 binned points and the same diagonal Gaussian likelihood.
 This is the fair comparison because SBI and MCMC then see the same data vector, same errors, and same forward model.
 The comparison should report posterior agreement, posterior predictive coverage, wall time per object, and the amortisation break-even point.
 
-## Code changes needed for time and flux inputs
+## Alternative future experiment: variable time grids
 
 The current SBI training code assumes a fixed time grid.
 In `transit_sbi.py`, the simulator evaluates every light curve on the global

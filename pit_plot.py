@@ -1,4 +1,4 @@
-"""PIT calibration check for the amortized MLE-compression NPE.
+"""PIT calibration check for a noise-aware amortized transit NPE.
 
 For many test draws theta* ~ prior, simulate a noisy curve, compress it, sample
 the NPE posterior, and form the per-parameter PIT
@@ -16,7 +16,7 @@ Usage:
     python pit_plot.py [weights_file]
 
 Outputs:
-    plots/pit.png
+    plots/pit_<compression>.png
 """
 import glob
 import os
@@ -31,10 +31,10 @@ from matplotlib.lines import Line2D
 from tqdm import trange
 
 from npe_wrapper import NPEEstimator
-from transit_sbi import simulate_compressed, PARAM_LABELS
+from transit_sbi import (COMPRESSION_MODES, load_flux_err_profiles,
+                         simulate_compressed, PARAM_LABELS)
 
-plt.rcParams.update({"text.usetex": True, "font.family": "serif",
-                     "font.size": 12})
+plt.rcParams.update({"font.family": "serif", "font.size": 12})
 
 # LaTeX panel labels per parameter.
 LATEX = {
@@ -44,7 +44,7 @@ LATEX = {
     "q1": r"$q_1$",
     "q2": r"$q_2$",
     "t0": r"$t_0$",
-    "scatter": r"$\mathrm{scatter}$",
+    "log10_jitter": r"$\log_{10}\,\mathrm{jitter}$",
 }
 
 N_TEST = 2000    # test draws from the prior
@@ -56,12 +56,31 @@ SEED = 0
 
 if __name__ == "__main__":
     np.random.seed(SEED)
+    candidates = (glob.glob("weights/npe_weighted_*.pkl")
+                  + glob.glob("weights/npe_hybrid_*.pkl"))
+    if len(sys.argv) != 2 and not candidates:
+        sys.exit("No noise-aware weights found. Run train_sbi.py first.")
     w = (sys.argv[1] if len(sys.argv) == 2
-         else max(glob.glob("weights/npe_mle_*.pkl"), key=os.path.getmtime))
+         else max(candidates, key=os.path.getmtime))
     print(f"Loading {w}")
     npe = NPEEstimator().load(w)
+    compression = npe.metadata_.get("compression")
+    if (compression not in COMPRESSION_MODES
+            or npe.metadata_.get("schema_version") != 4):
+        sys.exit("This model uses older preprocessing; retrain it.")
 
-    theta, summ = simulate_compressed(N_TEST)
+    profiles = load_flux_err_profiles()
+    if len(profiles) != npe.metadata_.get("error_profile_count"):
+        sys.exit("The Kepler library changed after training; retrain the model.")
+    holdout = np.asarray(
+        npe.metadata_.get("holdout_profile_indices", []), dtype=int
+    )
+    if len(holdout) == 0:
+        sys.exit("The model has no held-out error profiles; retrain it.")
+    print(f"Testing on {len(holdout)} held-out Kepler error profiles")
+    theta, summ = simulate_compressed(
+        N_TEST, mode=compression, flux_err_profiles=profiles[holdout]
+    )
     theta = np.asarray(theta)
 
     # Batched: one vectorised flow pass per chunk of summaries, not per draw.
@@ -105,5 +124,6 @@ if __name__ == "__main__":
     ], loc="center", frameon=False, handlelength=1.5)
 
     os.makedirs("plots", exist_ok=True)
-    fig.savefig("plots/pit.png", dpi=200)
-    print("Saved plots/pit.png")
+    output = f"plots/pit_{compression}.png"
+    fig.savefig(output, dpi=200)
+    print(f"Saved {output}")

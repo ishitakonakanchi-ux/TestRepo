@@ -168,6 +168,7 @@ class NPEEstimator:
         self.posteriors_ = []  # For ensemble
         self.summaries_ = None
         self.bounds_ = None  # (low, high) if trained in unbounded logit space
+        self.metadata_ = {}
 
     def _build_net(self, theta_sample, x_sample):
         """Construct the neural density estimator.
@@ -416,7 +417,7 @@ class NPEEstimator:
         # because sbi mixes CPU and device tensors internally. CPU sampling
         # avoids this and is fast for the small flows used here.
         x_tensor = torch.as_tensor(
-            np.asarray(x_obs, dtype=np.float32)).unsqueeze(0).cpu()
+            np.array(x_obs, dtype=np.float32, copy=True)).unsqueeze(0).cpu()
 
         # Unbounded-transform path: the flow was trained in logit space, so
         # sample from it directly (no rejection) and map back into the box.
@@ -515,21 +516,25 @@ class NPEEstimator:
         return self.posterior_.log_prob(
             theta_tensor, x=x_tensor).cpu().numpy()
 
-    def save(self, path):
+    def save(self, path, metadata=None):
         """Save the trained posterior(s) to a pickle file.
 
         Parameters
         ----------
         path : str
             Output file path.
+        metadata : dict or None
+            Small preprocessing manifest stored alongside the posterior.
         """
         if self.posteriors_:
             with open(path, "wb") as f:
                 pickle.dump(self.posteriors_, f)
         elif self.posterior_ is not None:
+            self.metadata_ = metadata or {}
             with open(path, "wb") as f:
                 pickle.dump({"posterior": self.posterior_,
-                             "bounds": self.bounds_}, f)
+                             "bounds": self.bounds_,
+                             "metadata": self.metadata_}, f)
         else:
             raise RuntimeError("Call fit_online() before save().")
 
@@ -568,9 +573,11 @@ class NPEEstimator:
             if isinstance(loaded, dict):  # new format: posterior + bounds
                 self.posterior_ = loaded["posterior"]
                 self.bounds_ = loaded["bounds"]
+                self.metadata_ = loaded.get("metadata", {})
             else:                          # old format: bare posterior
                 self.posterior_ = loaded
                 self.bounds_ = None
+                self.metadata_ = {}
             self.device = str(next(
                 self.posterior_.posterior_estimator.parameters()).device)
         return self

@@ -1,6 +1,7 @@
 plots/
 weights/
 __pycache__/
+.venv/
 sbi-logs/
 data/
 .DS_Store

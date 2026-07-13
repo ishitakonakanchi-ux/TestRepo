@@ -1,0 +1,12 @@
+astropy==7.2.0
+corner==2.2.3
+jax==0.9.1
+jaxlib==0.9.1
+jaxoplanet==0.1.0
+matplotlib==3.10.8
+numpy==2.4.2
+numpyro==0.20.1
+sbi==0.26.0
+scipy==1.17.1
+torch==2.5.1
+tqdm==4.67.3
