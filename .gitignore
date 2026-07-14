@@ -6,3 +6,5 @@ sbi-logs/
 data/
 .DS_Store
 explainer/
+*.out
+/env.sh

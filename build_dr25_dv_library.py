@@ -304,6 +304,46 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    """Validate cheap CLI invariants before querying or downloading data."""
+    if args.max_targets <= 0 and not args.all:
+        raise ValueError("--max-targets must be positive unless --all is used")
+    if args.min_transits_per_bin <= 0:
+        raise ValueError("--min-transits-per-bin must be positive")
+    if args.n_bins <= 1:
+        raise ValueError("--n-bins must be greater than one")
+    if args.max_plot_panels < 0:
+        raise ValueError("--max-plot-panels cannot be negative")
+
+    positive = {
+        "--window-days": args.window_days,
+        "--duration-window-factor": args.duration_window_factor,
+    }
+    optional_positive = {
+        "--min-snr": args.min_snr,
+        "--max-depth-ppm": args.max_depth_ppm,
+    }
+    non_negative = {
+        "--odd-even-threshold": args.odd_even_threshold,
+        "--odd-even-min-abs": args.odd_even_min_abs,
+        "--model-consistency-threshold": args.model_consistency_threshold,
+        "--model-consistency-min-abs": args.model_consistency_min_abs,
+        "--model-window-padding": args.model_window_padding,
+    }
+    for name, value in positive.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+    for name, value in optional_positive.items():
+        if value is not None and (not np.isfinite(value) or value <= 0):
+            raise ValueError(f"{name} must be positive and finite")
+    for name, value in non_negative.items():
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be non-negative and finite")
+    if (not np.isfinite(args.model_window_threshold)
+            or not 0 < args.model_window_threshold < 1):
+        raise ValueError("--model-window-threshold must be between 0 and 1")
+
+
 def parse_float(value: str) -> float:
     value = value.strip()
     if value == "":
@@ -1325,10 +1365,10 @@ def plot_error_overview(
 
 def main() -> int:
     args = parse_args()
-    if args.max_targets <= 0 and not args.all:
-        raise ValueError("--max-targets must be positive unless --all is used")
-    if args.min_transits_per_bin <= 0:
-        raise ValueError("--min-transits-per-bin must be positive")
+    try:
+        validate_args(args)
+    except ValueError as err:
+        raise SystemExit(str(err)) from err
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     curves_dir = args.output_dir / "curves"
@@ -1398,6 +1438,11 @@ def main() -> int:
                     flush=True,
                 )
             binned = bin_curve(dv, dv["window_days"], args.n_bins)
+            if (not np.all(np.isfinite(binned["flux_err"]))
+                    or np.any(binned["flux_err"] <= 0)):
+                raise RuntimeError(
+                    "Binned flux errors are not positive and finite"
+                )
             median_n_eff = float(np.nanmedian(binned["n_eff"]))
             if median_n_eff < args.min_transits_per_bin:
                 reject_reason = (

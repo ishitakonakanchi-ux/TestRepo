@@ -2,15 +2,26 @@
 
 The weighted mode uses 13 summaries (weighted approximate-MLE parameters,
 log10 jitter, and weighted Fisher log-widths). The hybrid mode appends the 50
-whitened residuals. Both modes train only on simulated transit fluxes while
-sampling empirical per-bin error profiles from the DR25 library.
+whitened residuals. The full mode also includes the fitted baseline and 50 log
+flux errors. Embedded uses those same full inputs with a learned context encoder
+that retains the fit summaries as a skip connection. Robust adds a four-start
+fit so separated grazing/non-grazing likelihood basins are visible to that
+encoder. All modes train only on simulated transit fluxes while sampling
+empirical per-bin error profiles from the DR25 library.
+
+Core mode keeps the robust full-context compressor but trains the density
+estimator only on ``b``, duration, radius ratio, and ``t0``. Limb darkening and
+jitter remain randomized simulator nuisance parameters and are therefore
+marginalized rather than predicted. Core-domain additionally augments training
+with moderate correlated noise, trends, outliers, error rescaling, and missing
+bins while retaining a substantial fraction of clean Gaussian simulations.
 
 Training draws mini-batches from a compressed pool that is regenerated (fresh
 simulations, recompressed) every REFRESH_EVERY epochs — a compromise between
 recompressing every epoch (costly) and a single frozen pool.
 
 Usage:
-    python train_sbi.py [--compression weighted|hybrid]
+    python train_sbi.py [--compression MODE]
 
 Outputs:
     weights/npe_<mode>_<timestamp>.pkl   trained posterior
@@ -36,15 +47,65 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sbi.utils import BoxUniform
 
-from npe_wrapper import NPEEstimator
-from transit_sbi import (COMPRESSION_MODES, HYBRID_LABELS, SUMMARY_LABELS,
+from npe_wrapper import FullContextEmbedding, NPEEstimator
+from transit_sbi import (COMPRESSION_MODES, FULL_LABELS, HYBRID_LABELS,
+                         SUMMARY_LABELS, CORE_MODES, CORE_PARAM_INDICES,
+                         CORE_PARAM_LABELS, CORE_PRIOR_LOW, CORE_PRIOR_HIGH,
                          load_flux_err_profiles, simulate_compressed,
-                         PRIOR_LOW, PRIOR_HIGH)
+                         PARAM_LABELS, PRIOR_LOW, PRIOR_HIGH)
 
 SEED = 42
-N_POOL = 150_000        # curves per pool
-REFRESH_EVERY = 50      # regenerate (re-simulate + recompress) the pool every N epochs
-DEVICE = "cpu"          # "cpu", "mps", or "cuda" for the flow training
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError as err:
+        raise SystemExit(f"{name} must be an integer") from err
+
+
+N_POOL = _env_int("NPE_POOL_SIZE", "150000")
+REFRESH_EVERY = _env_int("NPE_REFRESH_EVERY", "50")
+N_SIMS_PER_EPOCH = _env_int("NPE_SIMS_PER_EPOCH", "20000")
+N_EPOCHS = _env_int("NPE_EPOCHS", "1000")
+PATIENCE = _env_int("NPE_PATIENCE", "50")
+DEVICE = os.environ.get("NPE_DEVICE", "cpu")  # "cpu", "mps", or "cuda"
+CPU_THREADS = _env_int("NPE_CPU_THREADS", "2")
+
+
+def validate_training_config():
+    """Fail before allocating a simulation pool for invalid run settings."""
+    values = {
+        "NPE_POOL_SIZE": N_POOL,
+        "NPE_REFRESH_EVERY": REFRESH_EVERY,
+        "NPE_SIMS_PER_EPOCH": N_SIMS_PER_EPOCH,
+        "NPE_EPOCHS": N_EPOCHS,
+        "NPE_PATIENCE": PATIENCE,
+    }
+    invalid = [name for name, value in values.items() if value <= 0]
+    if invalid:
+        raise SystemExit(f"{', '.join(invalid)} must be positive")
+    n_validation = max(1, int(N_SIMS_PER_EPOCH * 0.1))
+    if n_validation >= N_POOL:
+        raise SystemExit(
+            "NPE_POOL_SIZE must exceed the fixed validation-set size "
+            f"({n_validation})"
+        )
+    try:
+        device = torch.device(DEVICE)
+    except RuntimeError as err:
+        raise SystemExit(f"Invalid NPE_DEVICE {DEVICE!r}: {err}") from err
+    if device.type not in ("cpu", "cuda", "mps"):
+        raise SystemExit("NPE_DEVICE must be cpu, cuda, or mps")
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("NPE_DEVICE requests CUDA, but CUDA is unavailable")
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        raise SystemExit("NPE_DEVICE requests MPS, but MPS is unavailable")
+    if device.type == "cuda":
+        if CPU_THREADS not in (1, 2):
+            raise SystemExit("NPE_CPU_THREADS must be 1 or 2 with CUDA")
+        torch.set_num_threads(CPU_THREADS)
+        torch.set_num_interop_threads(1)
 
 
 def _worker_init():
@@ -90,12 +151,17 @@ class RefreshingPool:
         self.seed = seed
         self.epoch = -1
         self._gen = 0
+        self._closed = False
         self._executor = ProcessPoolExecutor(
             max_workers=1, mp_context=mp.get_context("spawn"),
             initializer=_worker_init)
         # First pool: block (training can't start without it); then prefetch #2.
-        self.theta, self.summ = self._submit_next().result()
-        self._future = self._submit_next()
+        try:
+            self.theta, self.summ = self._submit_next().result()
+            self._future = self._submit_next()
+        except BaseException:
+            self.close()
+            raise
 
     def _submit_next(self):
         self._gen += 1
@@ -104,6 +170,8 @@ class RefreshingPool:
             self.flux_err_profiles)
 
     def __call__(self, n):
+        if not isinstance(n, (int, np.integer)) or n <= 0:
+            raise ValueError("pool sample size must be a positive integer")
         self.epoch += 1
         if self.epoch == 0:
             if n >= len(self.theta):
@@ -120,17 +188,35 @@ class RefreshingPool:
         return self.theta[idx], self.summ[idx]
 
     def close(self):
-        """Cancel any pending prefetch and shut the worker down."""
+        """Cancel prefetched work and shut the worker down promptly.
+
+        ``ProcessPoolExecutor.shutdown(cancel_futures=True)`` does not cancel a
+        task that is already running. Without terminating that worker, Python's
+        interpreter shutdown waits for an entire unused 150k-curve refresh
+        after early stopping and model serialization.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        process_map = getattr(self._executor, "_processes", None) or {}
+        processes = list(process_map.values())
         self._executor.shutdown(wait=False, cancel_futures=True)
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            process.join(timeout=1.0)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--compression", choices=COMPRESSION_MODES, default="weighted",
-        help="weighted summaries, or weighted summaries plus whitened residuals",
+        "--compression", choices=COMPRESSION_MODES, default="robust",
+        help=("conditioning/target mode; core modes marginalize limb darkening "
+              "and jitter"),
     )
     args = parser.parse_args()
+    validate_training_config()
 
     np.random.seed(SEED)
     torch.manual_seed(SEED)
@@ -148,9 +234,8 @@ if __name__ == "__main__":
         f"{len(holdout_indices)} held out for PIT"
     )
 
-    mps_ok = torch.backends.mps.is_available()
-    print(f"Backend:  flow (torch) -> {DEVICE}"
-          f"{'' if DEVICE != 'mps' or mps_ok else ' [WARNING: MPS unavailable]'}"
+    cpu_note = f"; {CPU_THREADS} CPU threads" if DEVICE.startswith("cuda") else ""
+    print(f"Backend:  flow (torch) -> {DEVICE}{cpu_note}"
           f"   |   compression (jax) -> {jax.default_backend()}")
 
     print(f"Building compressed pool ({N_POOL} curves, refresh every "
@@ -160,27 +245,54 @@ if __name__ == "__main__":
         flux_err_profiles=train_profiles, seed=SEED
     )
 
-    prior = BoxUniform(low=torch.tensor(PRIOR_LOW), high=torch.tensor(PRIOR_HIGH))
+    core = args.compression in CORE_MODES
+    target_low = CORE_PRIOR_LOW if core else PRIOR_LOW
+    target_high = CORE_PRIOR_HIGH if core else PRIOR_HIGH
+    prior = BoxUniform(
+        low=torch.tensor(target_low), high=torch.tensor(target_high)
+    )
     npe = NPEEstimator(
         model="nsf", hidden_features=128, num_transforms=10, learning_rate=1.5e-3,
         batch_size=1024, validation_fraction=0.1,
-        embedding_net=None, device=DEVICE,
+        embedding_net=(FullContextEmbedding()
+                       if args.compression in (
+                           "embedded", "robust", "core", "core_domain"
+                       ) else None),
+        device=DEVICE,
     )
-    npe.fit_online(simulate_fn=simulate_fn, sigma=0.0, prior=prior,
-                   n_sims_per_epoch=20_000, n_epochs=1000, patience=50)
-    simulate_fn.close()
+    try:
+        npe.fit_online(simulate_fn=simulate_fn, sigma=0.0, prior=prior,
+                       n_sims_per_epoch=N_SIMS_PER_EPOCH,
+                       n_epochs=N_EPOCHS, patience=PATIENCE)
+    finally:
+        simulate_fn.close()
 
     os.makedirs("weights", exist_ok=True)
     os.makedirs("plots", exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%Mm")
     model_fname = f"weights/npe_{args.compression}_{timestamp}.pkl"
-    labels = SUMMARY_LABELS if args.compression == "weighted" else HYBRID_LABELS
+    labels = {
+        "weighted": SUMMARY_LABELS,
+        "hybrid": HYBRID_LABELS,
+        "full": FULL_LABELS,
+        "embedded": FULL_LABELS,
+        "robust": FULL_LABELS,
+        "core": FULL_LABELS,
+        "core_domain": FULL_LABELS,
+    }[args.compression]
     npe.save(model_fname, metadata={
-        "schema_version": 4,
+        "schema_version": 5 if core else 4,
         "compression": args.compression,
-        "noise_model": "mixed_flux_err_plus_log10_jitter",
+        "noise_model": ("empirical_errors_plus_marginalized_domain_noise"
+                        if args.compression == "core_domain"
+                        else "mixed_flux_err_plus_log10_jitter"),
         "prior_low": PRIOR_LOW,
         "prior_high": PRIOR_HIGH,
+        "target_prior_low": target_low,
+        "target_prior_high": target_high,
+        "target_labels": CORE_PARAM_LABELS if core else list(PARAM_LABELS),
+        "target_indices": (list(CORE_PARAM_INDICES)
+                           if core else list(range(len(PARAM_LABELS)))),
         "summary_labels": labels,
         "error_profile_count": len(profiles),
         "training_profile_count": len(train_profiles),

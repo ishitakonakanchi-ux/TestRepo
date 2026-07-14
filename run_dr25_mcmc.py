@@ -260,6 +260,58 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    """Reject invalid sampler/prior settings before compiling the model."""
+    positive_ints = {
+        "--num-warmup": args.num_warmup,
+        "--num-samples": args.num_samples,
+        "--num-chains": args.num_chains,
+        "--max-tree-depth": args.max_tree_depth,
+    }
+    for name, value in positive_ints.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+    if (not np.isfinite(args.target_accept_prob)
+            or not 0 < args.target_accept_prob < 1):
+        raise ValueError("--target-accept-prob must be between 0 and 1")
+
+    positive = {
+        "--rp-prior-scale": args.rp_prior_scale,
+        "--t0-prior-scale": args.t0_prior_scale,
+        "--baseline-prior-scale": args.baseline_prior_scale,
+        "--jitter-scale-multiplier": args.jitter_scale_multiplier,
+        "--scatter-prior-multiplier": args.scatter_prior_multiplier,
+    }
+    if args.duration_prior_scale is not None:
+        positive["--duration-prior-scale"] = args.duration_prior_scale
+    if args.fixed_scatter_value is not None:
+        positive["--fixed-scatter-value"] = args.fixed_scatter_value
+    for name, value in positive.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+
+    finite = {
+        "--fix-t0-days": args.fix_t0_days,
+        "--fix-baseline": args.fix_baseline,
+    }
+    for name, value in finite.items():
+        if value is not None and not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if (args.fix_jitter is not None
+            and (not np.isfinite(args.fix_jitter) or args.fix_jitter < 0)):
+        raise ValueError("--fix-jitter must be non-negative and finite")
+
+    limb = fixed_limb_darkening(args)
+    if limb is not None:
+        u1, u2 = limb
+        if (not np.isfinite(u1) or not np.isfinite(u2)
+                or u1 < 0 or u1 + u2 > 1 or u1 + 2 * u2 < 0):
+            raise ValueError(
+                "Fixed limb darkening must satisfy u1 >= 0, u1 + u2 <= 1, "
+                "and u1 + 2*u2 >= 0"
+            )
+
+
 def load_target(library_path: Path, index: int) -> dict:
     if not library_path.exists():
         raise FileNotFoundError(
@@ -282,13 +334,20 @@ def load_target(library_path: Path, index: int) -> dict:
 
     duration_hours = float(library["dv_duration_hours"][index])
     depth_ppm = float(library["dv_depth_ppm"][index])
+    period_days = float(library["dv_period_days"][index])
+    if (not np.isfinite(period_days) or period_days <= 0
+            or not np.isfinite(duration_hours) or duration_hours <= 0
+            or not np.isfinite(depth_ppm) or depth_ppm <= 0):
+        raise RuntimeError(
+            "Target period, duration, and depth must be positive and finite"
+        )
     return {
         "index": index,
         "name": str(library["name"][index]),
         "label": str(library["label"][index]),
         "kepid": int(library["kepid"][index]),
         "tce_plnt_num": int(library["tce_plnt_num"][index]),
-        "period_days": float(library["dv_period_days"][index]),
+        "period_days": period_days,
         "epoch_bkjd": float(library["dv_epoch_bkjd"][index]),
         "duration_days": duration_hours / 24.0,
         "duration_hours": duration_hours,
@@ -577,6 +636,10 @@ def write_corner_plot(path: Path, mcmc: MCMC, target: dict) -> bool:
 
 def main() -> int:
     args = parse_args()
+    try:
+        validate_args(args)
+    except ValueError as err:
+        raise SystemExit(str(err)) from err
     if args.num_chains > 1 and args.chain_method == "parallel":
         numpyro.set_host_device_count(args.num_chains)
 

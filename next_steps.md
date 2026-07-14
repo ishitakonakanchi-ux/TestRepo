@@ -1,10 +1,11 @@
 # Kepler DR25 DV light curves: next steps
 
 > Current implementation: the production pipeline uses the fixed 50-bin grid.
-> Training fluxes remain simulated, while the weighted and hybrid compressors
-> mix pairs of real per-bin `flux_err` profiles, use log10 jitter, and reserve
-> 20% of the profiles for diagnostics. The variable-grid discussion below is an
-> alternative future path, not part of the recommended student workflow.
+> Training fluxes remain simulated. The recommended robust compressor mixes
+> pairs of real per-bin `flux_err` profiles, uses log10 jitter, retains fit
+> residual/error context, and reserves 20% of the profiles for diagnostics.
+> The variable-grid discussion below is an alternative future path, not part of
+> the recommended student workflow.
 
 The current data path uses the official Kepler DR25 Data Validation products.
 This is deliberate.
