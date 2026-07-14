@@ -39,7 +39,7 @@ python3 -m venv .venv
 `run_pipeline.sh` chains the main stages end to end:
 
 ```bash
-./run_pipeline.sh                 # build, train, refine (in order)
+./run_pipeline.sh                 # build, train, refine, PIT (in order)
 ./run_pipeline.sh train apply     # skip the library build
 ./run_pipeline.sh refine          # guarded NPE-IS using newest robust weights
 ./run_pipeline.sh check           # lightweight executable checks
@@ -51,11 +51,11 @@ MAX_TARGETS=30 ./run_pipeline.sh  # smaller, quicker library build
 ```
 
 Stages are `build`, `train`, `apply`, `refine`, `pit`, and `check`. With no
-arguments it runs `build train refine` in order; PIT is opt-in. The refined
-stage already performs the NPE-versus-NUTS comparison, so the unrefined
-`apply` stage is not also run by default. Set `WEIGHTS` to pin an exact model
-for `apply`, `refine`, or `pit`; otherwise the newest model compatible with
-`COMPRESSION` is selected. The
+arguments it runs `build train refine pit` in order, using the model's native
+noise distribution for PIT. The refined stage already performs the
+NPE-versus-NUTS comparison, so the unrefined `apply` stage is not also run by
+default. Set `WEIGHTS` to pin an exact model for `apply`, `refine`, or `pit`;
+otherwise the newest model compatible with `COMPRESSION` is selected. The
 sections below document each stage individually.
 
 ### 0. Build good Kepler DR25 light curves
@@ -229,7 +229,7 @@ sampled by NumPyro.
 | `example_transit.py` | Inference and diagnostic plots |
 | `run_dr25_mcmc.py` | NumPyro NUTS for one downloaded DR25 curve |
 | `build_dr25_dv_library.py` | Build accepted, binned Kepler DR25 DV light curves |
-| `run_pipeline.sh` | One-command pipeline: `build` → `train` → `refine` (+ opt-in `pit`) |
+| `run_pipeline.sh` | One-command pipeline: `build` → `train` → `refine` → `pit` |
 | `pit_plot.py` | PIT calibration diagnostic (amortized, batched) |
 | `test_noise_aware.py` | Executable checks for all compression and noise modes |
 | `next_steps.md` | Handoff notes for the DR25 DV data and SBI next steps |

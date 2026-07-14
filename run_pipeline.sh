@@ -9,7 +9,7 @@
 #
 # Usage:  ./run_pipeline.sh [stage ...]
 #   stages: build train apply refine pit check
-#   default: build train refine; PIT is opt-in
+#   default: build train refine pit
 #   e.g.  ./run_pipeline.sh train apply    # skip the library build
 #         ./run_pipeline.sh refine         # guarded NPE-IS accuracy mode
 #         ./run_pipeline.sh pit            # PIT calibration plot only
@@ -34,8 +34,7 @@ case "${1:-}" in
         cat <<'EOF'
 Usage: ./run_pipeline.sh [stage ...]
 
-Run the transit-SBI pipeline. With no stages, runs build train refine in order.
-(PIT is opt-in and never runs by default.)
+Run the transit-SBI pipeline. With no stages, runs build train refine pit in order.
 
 Stages:
   build    Build the DR25 DV library on the fixed 50-bin grid
@@ -46,7 +45,7 @@ Stages:
   check    Run compression tests, Python compilation, and shell syntax checks
 
 Examples:
-  ./run_pipeline.sh                 # full pipeline (build train refine)
+  ./run_pipeline.sh                 # full pipeline (build train refine pit)
   ./run_pipeline.sh train apply     # skip the library build
   COMPRESSION=core ./run_pipeline.sh train apply pit
   WEIGHTS=weights/npe_robust_<timestamp>.pkl ./run_pipeline.sh refine
@@ -72,9 +71,9 @@ EOF
         ;;
 esac
 
-# Stages to run: named args, or build/train/refine if none were supplied.
+# Stages to run: named args, or build/train/refine/pit if none were supplied.
 if (( $# == 0 )); then
-    STAGES=(build train refine)
+    STAGES=(build train refine pit)
 else
     STAGES=("$@")
 fi
