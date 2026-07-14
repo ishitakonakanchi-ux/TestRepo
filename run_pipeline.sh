@@ -19,7 +19,14 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-PY=${PY:-.venv/bin/python}
+# Default to the local .venv, falling back to the shared teaching venv.
+if [[ -z "${PY:-}" ]]; then
+    for cand in .venv/bin/python \
+                /Users/rstiskalek/Projects/Teaching/venv_teach/bin/python; do
+        [[ -x "$cand" ]] && PY="$cand" && break
+    done
+    PY=${PY:-.venv/bin/python}
+fi
 
 MAX_TARGETS=${MAX_TARGETS:-50}
 COMPRESSION=${COMPRESSION:-robust}
@@ -88,7 +95,7 @@ for s in "${STAGES[@]}"; do
     esac
 done
 if [[ ! -x "$PY" ]]; then
-    echo "Python not found at '$PY'. Create .venv as shown in README.md, or set PY." >&2
+    echo "Python not found at '$PY' (tried .venv and venv_teach). Create .venv as shown in README.md, or set PY." >&2
     exit 1
 fi
 run() {
