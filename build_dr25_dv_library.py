@@ -7,8 +7,8 @@ For each TCE it extracts the official DV detrended curve (`1 + LC_DETREND`),
 cuts a fixed window around transit, bins it to the SBI grid, and estimates
 per-bin errors from the empirical scatter and the number of distinct transits.
 
-By default this walks through the DR25 TCEs sorted by model SNR and keeps the
-first 20 that pass the quality filters. Use `--all` for the full DR25 TCE table.
+By default this reproducibly shuffles the DR25 TCE catalogue and keeps the
+first 50 targets that pass the quality filters. Use `--all` for the full table.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ except ModuleNotFoundError as err:
     missing = err.name
     raise SystemExit(
         f"Missing dependency '{missing}'. Run with the teaching venv, e.g.\n"
-        "  /Users/rstiskalek/Projects/Teaching/venv_teach/bin/python "
+        "  .venv/bin/python "
         "build_dr25_dv_library.py"
     ) from err
 
@@ -51,6 +51,8 @@ ARCHIVE_API_URL = (
 TCE_TABLE = "q1_q17_dr25_tce"
 KOI_TABLE = "q1_q17_dr25_koi"
 DR25_DV_STAMP = "20160128150956"
+CATALOG_SEED = 42
+KEPLER_BASELINE_DAYS = 1470.0
 SELECT_COLUMNS = [
     "kepid",
     "tce_plnt_num",
@@ -135,8 +137,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-targets",
         type=int,
-        default=20,
-        help="Maximum number of TCE curves to process. Ignored with --all.",
+        default=50,
+        help="Maximum number of accepted TCE curves. Ignored with --all.",
     )
     parser.add_argument(
         "--all",
@@ -148,6 +150,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Optional minimum DR25 model SNR filter.",
+    )
+    parser.add_argument(
+        "--min-transits-per-bin",
+        type=int,
+        default=3,
+        help="Minimum median number of transit epochs per phase bin (default 3).",
     )
     parser.add_argument(
         "--max-depth-ppm",
@@ -244,7 +252,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--window-mode",
         choices=("auto", "duration", "fixed"),
-        default="auto",
+        default="fixed",
         help=(
             "How to choose each half-window: auto from the DV model, "
             "duration from DR25 TDUR, or fixed from --window-days."
@@ -294,6 +302,46 @@ def parse_args() -> argparse.Namespace:
         help="Delete cached DR25 DV FITS files that are not in this selection.",
     )
     return parser.parse_args()
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    """Validate cheap CLI invariants before querying or downloading data."""
+    if args.max_targets <= 0 and not args.all:
+        raise ValueError("--max-targets must be positive unless --all is used")
+    if args.min_transits_per_bin <= 0:
+        raise ValueError("--min-transits-per-bin must be positive")
+    if args.n_bins <= 1:
+        raise ValueError("--n-bins must be greater than one")
+    if args.max_plot_panels < 0:
+        raise ValueError("--max-plot-panels cannot be negative")
+
+    positive = {
+        "--window-days": args.window_days,
+        "--duration-window-factor": args.duration_window_factor,
+    }
+    optional_positive = {
+        "--min-snr": args.min_snr,
+        "--max-depth-ppm": args.max_depth_ppm,
+    }
+    non_negative = {
+        "--odd-even-threshold": args.odd_even_threshold,
+        "--odd-even-min-abs": args.odd_even_min_abs,
+        "--model-consistency-threshold": args.model_consistency_threshold,
+        "--model-consistency-min-abs": args.model_consistency_min_abs,
+        "--model-window-padding": args.model_window_padding,
+    }
+    for name, value in positive.items():
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+    for name, value in optional_positive.items():
+        if value is not None and (not np.isfinite(value) or value <= 0):
+            raise ValueError(f"{name} must be positive and finite")
+    for name, value in non_negative.items():
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be non-negative and finite")
+    if (not np.isfinite(args.model_window_threshold)
+            or not 0 < args.model_window_threshold < 1):
+        raise ValueError("--model-window-threshold must be between 0 and 1")
 
 
 def parse_float(value: str) -> float:
@@ -368,7 +416,10 @@ def download_with_progress(url: str, path: Path) -> None:
 
 
 def build_tce_query_url(args: argparse.Namespace) -> str:
-    where_clauses = []
+    # Curves with periods longer than this cannot contain enough transits over
+    # the Kepler baseline, so reject them before downloading large FITS files.
+    max_period_days = KEPLER_BASELINE_DAYS / args.min_transits_per_bin
+    where_clauses = [f"tce_period<{max_period_days:g}"]
     if args.min_snr is not None:
         where_clauses.append(f"tce_model_snr>{args.min_snr:g}")
     if args.max_depth_ppm is not None:
@@ -476,8 +527,10 @@ def match_koi(record: TCERecord, koi_by_kepid: dict[int, list[KOIRecord]]) -> KO
 
 
 def koi_rejection_reason(koi: KOIRecord | None, allow_false_positives: bool) -> str:
-    if koi is None or allow_false_positives:
+    if allow_false_positives:
         return ""
+    if koi is None:
+        return "no matched KOI candidate"
     disposition = koi.disposition.upper()
     pdisposition = koi.pdisposition.upper()
     if disposition == "FALSE POSITIVE" or pdisposition == "FALSE POSITIVE":
@@ -1312,8 +1365,10 @@ def plot_error_overview(
 
 def main() -> int:
     args = parse_args()
-    if args.max_targets <= 0 and not args.all:
-        raise ValueError("--max-targets must be positive unless --all is used")
+    try:
+        validate_args(args)
+    except ValueError as err:
+        raise SystemExit(str(err)) from err
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     curves_dir = args.output_dir / "curves"
@@ -1322,6 +1377,13 @@ def main() -> int:
     records = fetch_tce_catalog(args)
     if not records:
         raise RuntimeError("No DR25 TCE records matched the query")
+    if not args.all and not args.no_download:
+        np.random.default_rng(CATALOG_SEED).shuffle(records)
+        print(
+            f"Sampling the catalogue in reproducible random order "
+            f"(seed {CATALOG_SEED})",
+            flush=True,
+        )
 
     koi_by_kepid: dict[int, list[KOIRecord]] = {}
     if not args.allow_koi_false_positives:
@@ -1376,6 +1438,31 @@ def main() -> int:
                     flush=True,
                 )
             binned = bin_curve(dv, dv["window_days"], args.n_bins)
+            if (not np.all(np.isfinite(binned["flux_err"]))
+                    or np.any(binned["flux_err"] <= 0)):
+                raise RuntimeError(
+                    "Binned flux errors are not positive and finite"
+                )
+            median_n_eff = float(np.nanmedian(binned["n_eff"]))
+            if median_n_eff < args.min_transits_per_bin:
+                reject_reason = (
+                    f"median transit epochs per bin {median_n_eff:.0f} < "
+                    f"{args.min_transits_per_bin}"
+                )
+                manifest_rows.append(
+                    manifest_row(
+                        record,
+                        status="rejected",
+                        fits_path=fits_path,
+                        curve_path=curve_path,
+                        koi=koi,
+                        dv=dv,
+                        binned=binned,
+                        reject_reason=reject_reason,
+                    )
+                )
+                print(f"  rejected: {reject_reason}", flush=True)
+                continue
             metrics = model_consistency_metrics(binned)
             binned.update(metrics)
             if not args.disable_model_consistency_filter:

@@ -33,6 +33,34 @@ from sbi.inference.posteriors import DirectPosterior
 from sbi.utils import BoxUniform
 
 
+class FullContextEmbedding(nn.Module):
+    """Retain fitted summaries while learning corrections from full context.
+
+    The first ``n_summary`` standardized inputs are the weighted fit summaries
+    plus fitted baseline. The remaining inputs are whitened residuals and the
+    error profile. The skip connection prevents the bottleneck from discarding
+    the useful approximate posterior location, while its MLP can repair local
+    fit failures from information the summaries missed.
+    """
+
+    def __init__(self, n_summary=14, context_features=32):
+        super().__init__()
+        self.n_summary = n_summary
+        self.context_net = nn.Sequential(
+            nn.Linear(100, 128),
+            nn.SiLU(),
+            nn.Linear(128, 64),
+            nn.SiLU(),
+            nn.Linear(64, context_features),
+        )
+
+    def forward(self, x):
+        return torch.cat(
+            (x[..., :self.n_summary], self.context_net(x[..., self.n_summary:])),
+            dim=-1,
+        )
+
+
 def _prior_to_cpu(prior):
     """Return a CPU copy of a BoxUniform / Independent(Uniform) prior.
 
@@ -94,6 +122,20 @@ def _sample_on_cpu(posterior, n_samples, x_tensor_cpu, show_progress_bars,
         if orig_post_device is not None:
             posterior._device = orig_post_device
     return out
+
+
+def _sample_transformed_on_cpu(posterior, n_samples, x_tensor_cpu, bounds):
+    """Sample a logit-space flow directly and map draws into its prior box."""
+    net = posterior.posterior_estimator
+    original_device = next(net.parameters()).device
+    lo, hi = (bound.cpu() for bound in bounds)
+    net.to("cpu")
+    try:
+        with torch.no_grad():
+            z = net.net.sample(n_samples, context=x_tensor_cpu)
+        return _to_bounded(z, lo, hi).cpu().numpy()
+    finally:
+        net.to(original_device)
 
 
 class NPEEstimator:
@@ -168,6 +210,7 @@ class NPEEstimator:
         self.posteriors_ = []  # For ensemble
         self.summaries_ = None
         self.bounds_ = None  # (low, high) if trained in unbounded logit space
+        self.metadata_ = {}
 
     def _build_net(self, theta_sample, x_sample):
         """Construct the neural density estimator.
@@ -231,6 +274,20 @@ class NPEEstimator:
         -------
         self
         """
+        if (not isinstance(n_sims_per_epoch, (int, np.integer))
+                or n_sims_per_epoch <= 0):
+            raise ValueError("n_sims_per_epoch must be a positive integer")
+        if not isinstance(n_epochs, (int, np.integer)) or n_epochs <= 0:
+            raise ValueError("n_epochs must be a positive integer")
+        if not isinstance(patience, (int, np.integer)) or patience <= 0:
+            raise ValueError("patience must be a positive integer")
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if not 0.0 < self.validation_fraction < 1.0:
+            raise ValueError("validation_fraction must be between 0 and 1")
+        if not np.isfinite(sigma) or sigma < 0:
+            raise ValueError("sigma must be finite and non-negative")
+
         # If the prior is a box, learn in an unbounded (logit) space so the flow
         # cannot place mass outside the prior -> sampling needs no rejection.
         base = getattr(prior, "base_dist", None)
@@ -268,6 +325,7 @@ class NPEEstimator:
             min_lr=1e-4)
 
         best_val_loss = float("inf")
+        best_state = {k: v.clone() for k, v in net.state_dict().items()}
         epochs_without_improvement = 0
         train_losses, val_losses = [], []
 
@@ -284,7 +342,7 @@ class NPEEstimator:
 
             train_loader = DataLoader(
                 TensorDataset(theta_t, x_t),
-                batch_size=self.batch_size, shuffle=True, drop_last=True)
+                batch_size=self.batch_size, shuffle=True, drop_last=False)
 
             # Train
             net.train()
@@ -307,12 +365,18 @@ class NPEEstimator:
                 optimizer.step()
                 epoch_loss += loss.item()
                 n_batches += 1
-            train_losses.append(epoch_loss / max(n_batches, 1))
+            if n_batches == 0:
+                raise RuntimeError(
+                    "Every training batch had a non-finite loss or gradient"
+                )
+            train_losses.append(epoch_loss / n_batches)
 
             # Validate on fixed set
             net.eval()
             with torch.no_grad():
                 val_loss = net.loss(theta_val, x_val).mean().item()
+            if not np.isfinite(val_loss):
+                raise RuntimeError("Validation loss became non-finite")
             val_losses.append(val_loss)
 
             scheduler.step(val_loss)
@@ -361,8 +425,10 @@ class NPEEstimator:
         self
         """
         import copy
+        if not isinstance(n_ensemble, (int, np.integer)) or n_ensemble <= 0:
+            raise ValueError("n_ensemble must be a positive integer")
         self.posteriors_ = []
-        self.summaries_ = []
+        ensemble_summaries = []
 
         for i in range(n_ensemble):
             print(f"\n=== Training ensemble member {i+1}/{n_ensemble} ===")
@@ -376,15 +442,18 @@ class NPEEstimator:
             # Temporarily swap and train
             original_embedding = self.embedding_net
             self.embedding_net = embedding_copy
-            self.fit_online(simulate_fn, sigma, prior, n_sims_per_epoch,
-                           n_epochs, patience)
-            self.embedding_net = original_embedding
+            try:
+                self.fit_online(simulate_fn, sigma, prior, n_sims_per_epoch,
+                                n_epochs, patience)
+            finally:
+                self.embedding_net = original_embedding
 
             # Store results
             self.posteriors_.append(self.posterior_)
-            self.summaries_.extend(self.summaries_)
+            ensemble_summaries.extend(self.summaries_)
             self.posterior_ = None  # Clear single posterior
 
+        self.summaries_ = ensemble_summaries
         print(f"\nEnsemble training complete: {n_ensemble} networks")
         return self
 
@@ -410,39 +479,44 @@ class NPEEstimator:
         samples : array (n_samples, n_params)
             Posterior samples.
         """
+        if not isinstance(n_samples, (int, np.integer)) or n_samples <= 0:
+            raise ValueError("n_samples must be a positive integer")
         # Sampling is forced onto CPU. sbi's DirectPosterior.sample uses
         # rejection sampling against the prior's support; on MPS this triggers
         # a device-mismatch (mps:0 vs cpu) inside torch's constraint check
         # because sbi mixes CPU and device tensors internally. CPU sampling
         # avoids this and is fast for the small flows used here.
         x_tensor = torch.as_tensor(
-            np.asarray(x_obs, dtype=np.float32)).unsqueeze(0).cpu()
+            np.array(x_obs, dtype=np.float32, copy=True)).unsqueeze(0).cpu()
+
+        # Ensemble: sample equally from each posterior
+        if self.posteriors_:
+            base, remainder = divmod(n_samples, len(self.posteriors_))
+            all_samples = []
+            for i, post in enumerate(self.posteriors_):
+                count = base + (i < remainder)
+                if count == 0:
+                    continue
+                if self.bounds_ is None:
+                    s = _sample_on_cpu(
+                        post, count, x_tensor,
+                        show_progress_bars, max_sampling_time,
+                    )
+                else:
+                    s = _sample_transformed_on_cpu(
+                        post, count, x_tensor, self.bounds_
+                    ).reshape(-1, len(self.bounds_[0]))
+                all_samples.append(s)
+            return np.concatenate(all_samples, axis=0)
 
         # Unbounded-transform path: the flow was trained in logit space, so
         # sample from it directly (no rejection) and map back into the box.
         # Every sample is in-prior by construction -> 100% acceptance.
         if self.bounds_ is not None and self.posterior_ is not None:
-            de = self.posterior_.posterior_estimator
-            orig_device = next(de.parameters()).device
-            de.to("cpu")
-            try:
-                with torch.no_grad():
-                    z = de.net.sample(n_samples, context=x_tensor)
-                z = z.reshape(-1, z.shape[-1])
-                theta = _to_bounded(z, *self.bounds_).cpu().numpy()
-            finally:
-                de.to(orig_device)
+            theta = _sample_transformed_on_cpu(
+                self.posterior_, n_samples, x_tensor, self.bounds_
+            ).reshape(-1, len(self.bounds_[0]))
             return theta[:n_samples]
-
-        # Ensemble: sample equally from each posterior
-        if self.posteriors_:
-            samples_per = n_samples // len(self.posteriors_)
-            all_samples = []
-            for post in self.posteriors_:
-                s = _sample_on_cpu(post, samples_per, x_tensor,
-                                   show_progress_bars, max_sampling_time)
-                all_samples.append(s)
-            return np.concatenate(all_samples, axis=0)
 
         # Single posterior
         if self.posterior_ is None:
@@ -466,9 +540,26 @@ class NPEEstimator:
         -------
         samples : array (n_obs, n_samples, n_params)
         """
-        if self.posterior_ is None:
+        if not isinstance(n_samples, (int, np.integer)) or n_samples <= 0:
+            raise ValueError("n_samples must be a positive integer")
+        if self.posterior_ is None and not self.posteriors_:
             raise RuntimeError("Call fit_online() before sample_batch().")
         x = torch.as_tensor(np.array(x_obs, dtype=np.float32)).cpu()
+        if self.posteriors_:
+            if self.bounds_ is None:
+                raise RuntimeError(
+                    "Batched sampling is unavailable for legacy ensembles "
+                    "without saved parameter bounds"
+                )
+            base, remainder = divmod(n_samples, len(self.posteriors_))
+            pieces = []
+            for i, post in enumerate(self.posteriors_):
+                count = base + (i < remainder)
+                if count:
+                    pieces.append(_sample_transformed_on_cpu(
+                        post, count, x, self.bounds_
+                    ))
+            return np.concatenate(pieces, axis=1)
         de = self.posterior_.posterior_estimator
         orig_device = next(de.parameters()).device
         de.to("cpu")
@@ -500,36 +591,76 @@ class NPEEstimator:
         if self.posterior_ is None and not self.posteriors_:
             raise RuntimeError("Call fit_online() before log_prob().")
         x_tensor = torch.as_tensor(
-            np.asarray(x_obs, dtype=np.float32)).unsqueeze(0).to(self.device)
+            np.array(x_obs, dtype=np.float32, copy=True)).unsqueeze(0)
         theta_tensor = torch.as_tensor(
-            np.asarray(theta, dtype=np.float32)).to(self.device)
+            np.array(theta, dtype=np.float32, copy=True))
+
+        # The flow is trained in logit-transformed coordinates. Evaluate that
+        # density directly and include the inverse-transform Jacobian so callers
+        # receive a density in the original bounded parameter coordinates.
+        if self.bounds_ is not None:
+            lo, hi = (bound.cpu() for bound in self.bounds_)
+            inside = ((theta_tensor > lo) & (theta_tensor < hi)).all(dim=-1)
+            z = _to_unbounded(theta_tensor, lo, hi)
+            log_jac = (
+                torch.log(hi - lo)
+                - torch.log((theta_tensor - lo).clamp_min(1e-12))
+                - torch.log((hi - theta_tensor).clamp_min(1e-12))
+            ).sum(dim=-1)
+            posts = self.posteriors_ or [self.posterior_]
+            log_probs = []
+            for post in posts:
+                de = post.posterior_estimator
+                orig_device = next(de.parameters()).device
+                de.to("cpu")
+                try:
+                    with torch.no_grad():
+                        context = x_tensor.expand(len(theta_tensor), -1)
+                        lp = de.net.log_prob(z, context=context) + log_jac
+                finally:
+                    de.to(orig_device)
+                log_probs.append(lp)
+            stacked = torch.stack(log_probs)
+            result = torch.logsumexp(stacked, dim=0) - np.log(len(log_probs))
+            result = torch.where(inside, result, torch.full_like(result, -torch.inf))
+            return result.numpy()
+
+        x_tensor = x_tensor.to(self.device)
+        theta_tensor = theta_tensor.to(self.device)
 
         if self.posteriors_:
-            # Average log probs across ensemble
+            # Average densities (not log densities) across the ensemble.
             log_probs = []
             for post in self.posteriors_:
-                lp = post.log_prob(theta_tensor, x=x_tensor).cpu().numpy()
+                lp = post.log_prob(theta_tensor, x=x_tensor)
                 log_probs.append(lp)
-            return np.mean(log_probs, axis=0)
+            return (torch.logsumexp(torch.stack(log_probs), dim=0)
+                    - np.log(len(log_probs))).cpu().numpy()
 
         return self.posterior_.log_prob(
             theta_tensor, x=x_tensor).cpu().numpy()
 
-    def save(self, path):
+    def save(self, path, metadata=None):
         """Save the trained posterior(s) to a pickle file.
 
         Parameters
         ----------
         path : str
             Output file path.
+        metadata : dict or None
+            Small preprocessing manifest stored alongside the posterior.
         """
+        self.metadata_ = metadata or {}
         if self.posteriors_:
             with open(path, "wb") as f:
-                pickle.dump(self.posteriors_, f)
+                pickle.dump({"posteriors": self.posteriors_,
+                             "bounds": self.bounds_,
+                             "metadata": self.metadata_}, f)
         elif self.posterior_ is not None:
             with open(path, "wb") as f:
                 pickle.dump({"posterior": self.posterior_,
-                             "bounds": self.bounds_}, f)
+                             "bounds": self.bounds_,
+                             "metadata": self.metadata_}, f)
         else:
             raise RuntimeError("Call fit_online() before save().")
 
@@ -560,17 +691,32 @@ class NPEEstimator:
             finally:
                 torch.storage._load_from_bytes = orig
         if isinstance(loaded, list):
+            self.posterior_ = None
             self.posteriors_ = loaded
+            self.bounds_ = None
+            self.metadata_ = {}
             # Get device from first posterior's neural net
             self.device = str(next(
                 self.posteriors_[0].posterior_estimator.parameters()).device)
         else:
-            if isinstance(loaded, dict):  # new format: posterior + bounds
+            if isinstance(loaded, dict) and "posteriors" in loaded:
+                self.posterior_ = None
+                self.posteriors_ = loaded["posteriors"]
+                self.bounds_ = loaded.get("bounds")
+                self.metadata_ = loaded.get("metadata", {})
+                self.device = str(next(
+                    self.posteriors_[0].posterior_estimator.parameters()
+                ).device)
+                return self
+            self.posteriors_ = []
+            if isinstance(loaded, dict):  # single posterior + bounds
                 self.posterior_ = loaded["posterior"]
                 self.bounds_ = loaded["bounds"]
+                self.metadata_ = loaded.get("metadata", {})
             else:                          # old format: bare posterior
                 self.posterior_ = loaded
                 self.bounds_ = None
+                self.metadata_ = {}
             self.device = str(next(
                 self.posterior_.posterior_estimator.parameters()).device)
         return self
