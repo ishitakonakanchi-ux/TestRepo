@@ -5,6 +5,10 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import jit, vmap, jacfwd, lax
+try:
+    from jax import enable_x64
+except ImportError:  # JAX < 0.8
+    from jax.experimental import enable_x64
 from jaxoplanet.orbits import TransitOrbit
 from jaxoplanet.light_curves import limb_dark_light_curve
 
@@ -470,7 +474,7 @@ def score_compress(x, flux_err, mode="weighted"):
     # `example_transit.py` enables x64 for NUTS. Compile and execute the
     # compressor under the training-time x64 setting so its branch decisions
     # are identical in training, validation, and application.
-    with jax.enable_x64(False):
+    with enable_x64(False):
         out = compress(x_batch, err_batch)
     return out[0] if single else out
 

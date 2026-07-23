@@ -3,11 +3,10 @@
 from types import MethodType
 
 import numpy as np
-import jax
 
 import npe_wrapper
 from npe_wrapper import NPEEstimator
-from transit_sbi import (N_OBS, score_compress, simulate_compressed,
+from transit_sbi import (N_OBS, enable_x64, score_compress, simulate_compressed,
                          simulate_dataset, simulator,
                          _domain_randomized_observation)
 
@@ -110,7 +109,7 @@ def main():
 
     # NUTS enables x64, but application-time compression must remain identical
     # to the float32 map used to generate the NPE training set.
-    with jax.enable_x64(True):
+    with enable_x64(True):
         weighted_x64_caller = np.asarray(
             score_compress(flux, flux_err, mode="weighted")
         )
