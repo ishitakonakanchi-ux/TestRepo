@@ -1,7 +1,7 @@
 """NPE vs MCMC vs Truth for Mock B, rp_rs parameter."""
 import glob, numpy as np, matplotlib.pyplot as plt
 from npe_wrapper import NPEEstimator
-from transit_sbi import simulator, N_OBS
+from transit_sbi import simulator, score_compress, N_OBS
 
 IDX = 2  # rp_rs
 TRUE_B = np.array([0.55, 0.25, 0.17, 0.50, 0.30, 0.0, np.log10(2e-3)])
@@ -13,8 +13,11 @@ sigma = np.sqrt(flux_err**2 + 10.0 ** (2.0 * TRUE_B[-1]))
 np.random.seed(0)
 x = np.array(simulator(TRUE_B)) + np.random.normal(0, sigma, N_OBS)
 
+#loading npe + sampling
 npe = NPEEstimator().load(sorted(glob.glob("weights/npe_robust_*.pkl"))[-1])
-npe_rp = npe.sample(x, n_samples=10_000, show_progress_bars=False)[:, IDX]
+mode = npe.metadata_.get("compression")
+summary = np.array(score_compress(x, flux_err, mode=mode))
+npe_rp = npe.sample(summary, n_samples=10_000, show_progress_bars=False)[:, IDX]
 
 fig, ax = plt.subplots(figsize=(8, 5))
 bins = np.linspace(min(npe_rp.min(), mcmc_rp.min()), max(npe_rp.max(), mcmc_rp.max()), 60)
