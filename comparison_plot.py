@@ -1,23 +1,26 @@
-"""NPE vs MCMC vs Truth for Mock B's rp_rs parameter."""
+"""NPE vs MCMC vs Truth for Mock B, rp_rs parameter."""
 import glob, pickle, numpy as np, matplotlib.pyplot as plt
+import torch
+from transit_sbi import simulator, N_OBS
 
 IDX = 2  # rp_rs
-
+TRUE_B = np.array([0.55, 0.25, 0.17, 0.50, 0.30, 0.0, np.log10(2e-3)])
 
 mcmc_rp = np.load("data/mcmc_cache/mock_B.npz")["samples"][:, IDX]
 
-#load npe and sample
+# regenerating planet b's lightcurve
+flux_err = np.full(N_OBS, 5e-4)
+sigma = np.sqrt(flux_err**2 + 10.0 ** (2.0 * TRUE_B[-1]))
+np.random.seed(0)  # for reproducibility
+x = np.array(simulator(TRUE_B)) + np.random.normal(0, sigma, N_OBS)
+
+from transit_sbi import score_compress
+summary = np.asarray(score_compress(x, flux_err))
+
+# loading npe + sampling
 with open(sorted(glob.glob("weights/npe_robust_*.pkl"))[-1], "rb") as f:
     posterior = pickle.load(f)["posterior"]
-
-
-from transit_sbi import simulate_compressed
-TRUE_MOCK_B = np.array([0.55, 0.25, 0.17, 0.5, 0.3, 0.0, -2.699])
-_, summary = simulate_compressed(TRUE_MOCK_B[None, :], seed=1)
-
-# sample NPE
-import torch
-npe_rp = posterior.sample((10_000,), x=torch.tensor(summary[0], dtype=torch.float32)).numpy()[:, IDX]
+npe_rp = posterior.sample((10_000,), x=torch.tensor(summary, dtype=torch.float32)).numpy()[:, IDX]
 
 
 fig, ax = plt.subplots(figsize=(8, 5))
