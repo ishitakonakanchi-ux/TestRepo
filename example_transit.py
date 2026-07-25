@@ -53,7 +53,7 @@ from transit_sbi import (simulator, simulator_batch, score_compress, t_obs,
 SEED = 42
 PLOT_DIR = "plots"
 LIBRARY = "data/dr25_dv_library/dr25_dv_sbi_library.npz"
-N_KEPLER = int(os.environ.get("N_KEPLER", "4"))
+N_KEPLER = int(os.environ.get("N_KEPLER", "8"))
 IMPORTANCE_REFINE_VALUE = os.environ.get("NPE_IMPORTANCE_REFINE", "0")
 IMPORTANCE_REFINE = IMPORTANCE_REFINE_VALUE == "1"
 IMPORTANCE_BATCH = int(os.environ.get(
