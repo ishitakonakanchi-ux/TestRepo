@@ -2,7 +2,6 @@
 import csv, numpy as np, matplotlib.pyplot as plt
 
 PARAM = "rp_rs"
-
 npe_mean, npe_std, mcmc_mean, mcmc_std = [], [], [], []
 with open("plots/robust_comparison.csv") as f:
     for r in csv.DictReader(f):
