@@ -1,32 +1,49 @@
-"""NPE vs MCMC vs Truth for Mock B, rp_rs parameter."""
-import glob, numpy as np, matplotlib.pyplot as plt
-from npe_wrapper import NPEEstimator
-from transit_sbi import simulator, score_compress, N_OBS
+"""Accuracy and precision benchmark: NPE vs MCMC for rp_rs across all objects."""
+import csv, numpy as np, matplotlib.pyplot as plt
 
-IDX = 2  # rp_rs
-TRUE_B = np.array([0.55, 0.25, 0.17, 0.50, 0.30, 0.0, np.log10(2e-3)])
+PARAM = "rp_rs"
 
-mcmc_rp = np.load("data/mcmc_cache/mock_B.npz")["samples"][:, IDX]
+# loading rows for rp_rs
+npe_mean, npe_std, mcmc_mean, mcmc_std = [], [], [], []
+with open("plots/robust_comparison.csv") as f:
+    for r in csv.DictReader(f):
+        if r["parameter"] == PARAM and r["nuts_converged"] == "True":
+            npe_mean.append(float(r["npe_mean"]))
+            npe_std.append(float(r["npe_std"]))
+            mcmc_mean.append(float(r["mcmc_mean"]))
+            mcmc_std.append(float(r["mcmc_std"]))
 
-flux_err = np.full(N_OBS, 5e-4)
-sigma = np.sqrt(flux_err**2 + 10.0 ** (2.0 * TRUE_B[-1]))
-np.random.seed(0)
-x = np.array(simulator(TRUE_B)) + np.random.normal(0, sigma, N_OBS)
+npe_mean, npe_std = np.array(npe_mean), np.array(npe_std)
+mcmc_mean, mcmc_std = np.array(mcmc_mean), np.array(mcmc_std)
+print(f"Using {len(npe_mean)} converged objects")
 
-#loading npe + sampling
-npe = NPEEstimator().load(sorted(glob.glob("weights/npe_robust_*.pkl"))[-1])
-mode = npe.metadata_.get("compression")
-summary = np.array(score_compress(x, flux_err, mode=mode))
-npe_rp = npe.sample(summary, n_samples=10_000, show_progress_bars=False)[:, IDX]
+fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
 
-fig, ax = plt.subplots(figsize=(8, 5))
-bins = np.linspace(min(npe_rp.min(), mcmc_rp.min()), max(npe_rp.max(), mcmc_rp.max()), 60)
-c = 0.5 * (bins[1:] + bins[:-1])
-ax.plot(c, np.histogram(npe_rp, bins=bins, density=True)[0], "C0", lw=2, label="NPE")
-ax.plot(c, np.histogram(mcmc_rp, bins=bins, density=True)[0], "C2", lw=2, label="MCMC")
-ax.axvline(0.17, color="red", ls="--", lw=2, label="True = 0.17")
-ax.set(xlabel=r"$R_p/R_\star$", ylabel="Density",
-       title=r"Posterior benchmarking for $R_p/R_\star$ (Mock B)")
+# means/accuracy plot
+ax = axes[0]
+ax.scatter(mcmc_mean, npe_mean, s=90, alpha=0.75, color="C0", edgecolor="k", zorder=3)
+lo, hi = min(mcmc_mean.min(), npe_mean.min()), max(mcmc_mean.max(), npe_mean.max())
+pad = 0.08 * (hi - lo)
+ax.plot([lo-pad, hi+pad], [lo-pad, hi+pad], "k--", alpha=0.6, label="y = x (perfect agreement)")
+ax.set(xlabel=r"MCMC mean of $R_p/R_\star$",
+       ylabel=r"NPE mean of $R_p/R_\star$",
+       title="Accuracy comparison")
 ax.legend()
-fig.savefig("plots/comparison_rp_rs_mock_B.png", dpi=150, bbox_inches="tight")
-print("Saved plots/comparison_rp_rs_mock_B.png")
+ax.grid(alpha=0.3)
+
+# std/precision plot
+ax = axes[1]
+ax.scatter(mcmc_std, npe_std, s=90, alpha=0.75, color="C2", edgecolor="k", zorder=3)
+lo, hi = min(mcmc_std.min(), npe_std.min()), max(mcmc_std.max(), npe_std.max())
+pad = 0.08 * (hi - lo)
+ax.plot([lo-pad, hi+pad], [lo-pad, hi+pad], "k--", alpha=0.6, label="y = x (perfect agreement)")
+ax.set(xlabel=r"MCMC std of $R_p/R_\star$",
+       ylabel=r"NPE std of $R_p/R_\star$",
+       title="Precision comparison")
+ax.legend()
+ax.grid(alpha=0.3)
+
+plt.suptitle(r"NPE vs MCMC benchmarking for $R_p/R_\star$", fontsize=14)
+plt.tight_layout()
+fig.savefig("plots/benchmark_rp_rs.png", dpi=150, bbox_inches="tight")
+print("Saved plots/benchmark_rp_rs.png")
