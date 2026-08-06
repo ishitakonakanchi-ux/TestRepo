@@ -37,7 +37,7 @@ ax.plot(xr, m * xr + b, "r-", alpha=0.7,
         label=f"best fit: y = {m:.3f}x + {b:.4f}")
 ax.set(xlabel=r"MCMC mean of $R_p/R_\star$",
        ylabel=r"NPE mean of $R_p/R_\star$",
-       title="Accuracy comparison", xlim=xr, ylim=xr)
+       title="Posterior Mean Benchmark", xlim=xr, ylim=xr)
 ax.grid(alpha=0.3)
 
 # --- Precision plot ---
@@ -54,7 +54,7 @@ ax.plot(xr, m * xr + b, "r-", alpha=0.7,
         label=f"best fit: y = {m:.3f}x + {b:.4f}")
 ax.set(xlabel=r"MCMC std of $R_p/R_\star$",
        ylabel=r"NPE std of $R_p/R_\star$",
-       title="Precision comparison", xlim=xr, ylim=xr)
+       title="Precision Benchmark", xlim=xr, ylim=xr)
 ax.grid(alpha=0.3)
 
 # Shared legend on the right side of the figure
