@@ -34,15 +34,15 @@ def plot_panel(ax, x, y, xlabel, ylabel, title, zoom_extent):
     xr = np.array([lo - pad, hi + pad])
     yx_line, = ax.plot(xr, xr, "k--", alpha=0.6, label="y = x")
     m, b, m_err, b_err = fit_with_uncertainty(x, y)
+    sign = "+" if b >= 0 else "−"
     fit_line, = ax.plot(xr, m * xr + b, "r-", alpha=0.7,
-            label=f"best fit: slope = {m:.3f} ± {m_err:.3f}\n"
-                  f"           intercept = {b:.4f} ± {b_err:.4f}")
+        label=f"best fit: y = ({m:.3f} ± {m_err:.3f})x {sign} ({abs(b):.4f} ± {b_err:.4f})")
     ax.set(xlabel=xlabel, ylabel=ylabel, title=title, xlim=xr, ylim=xr)
-    # Only show y=x and best-fit in the legend (not all objects)
+    # only show y=x and best-fit in the legend 
     ax.legend(handles=[yx_line, fit_line], fontsize=9, loc="upper left")
     ax.grid(alpha=0.3)
 
-    # Inset zoom on the cluster
+    # inset zoom
     axins = inset_axes(ax, width="40%", height="40%", loc="lower right",
                        borderpad=2)
     for i in range(n_objects):
