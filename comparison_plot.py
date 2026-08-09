@@ -28,20 +28,21 @@ def fit_with_uncertainty(x, y):
 def plot_panel(ax, x, y, xlabel, ylabel, title, zoom_extent):
     for i, name in enumerate(names):
         ax.scatter(x[i], y[i], s=110, alpha=0.85, color=colors[i],
-                   edgecolor="k", zorder=3, label=name)
+                   edgecolor="k", zorder=3)  # removed label=name
     lo, hi = min(x.min(), y.min()), max(x.max(), y.max())
     pad = 0.08 * (hi - lo)
     xr = np.array([lo - pad, hi + pad])
-    ax.plot(xr, xr, "k--", alpha=0.6, label="y = x")
+    yx_line, = ax.plot(xr, xr, "k--", alpha=0.6, label="y = x")
     m, b, m_err, b_err = fit_with_uncertainty(x, y)
-    ax.plot(xr, m * xr + b, "r-", alpha=0.7,
+    fit_line, = ax.plot(xr, m * xr + b, "r-", alpha=0.7,
             label=f"best fit: slope = {m:.3f} ± {m_err:.3f}\n"
                   f"           intercept = {b:.4f} ± {b_err:.4f}")
     ax.set(xlabel=xlabel, ylabel=ylabel, title=title, xlim=xr, ylim=xr)
-    ax.legend(fontsize=8, loc="upper left")
+    # Only show y=x and best-fit in the legend (not all objects)
+    ax.legend(handles=[yx_line, fit_line], fontsize=9, loc="upper left")
     ax.grid(alpha=0.3)
 
-    # inset zoom
+    # Inset zoom on the cluster
     axins = inset_axes(ax, width="40%", height="40%", loc="lower right",
                        borderpad=2)
     for i in range(n_objects):
