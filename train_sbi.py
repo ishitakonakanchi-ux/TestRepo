@@ -51,10 +51,12 @@ from npe_wrapper import FullContextEmbedding, NPEEstimator
 from transit_sbi import (COMPRESSION_MODES, FULL_LABELS, HYBRID_LABELS,
                          SUMMARY_LABELS, CORE_MODES, CORE_PARAM_INDICES,
                          CORE_PARAM_LABELS, CORE_PRIOR_LOW, CORE_PRIOR_HIGH,
+                         DEFAULT_ERROR_LIBRARY, dr25_in_prior_mask,
                          load_flux_err_profiles, simulate_compressed,
                          PARAM_LABELS, PRIOR_LOW, PRIOR_HIGH)
 
 SEED = 42
+N_HOLDOUT = 10
 
 
 def _env_int(name, default):
@@ -222,12 +224,20 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
 
     profiles = load_flux_err_profiles()
-    if len(profiles) < 5:
-        raise SystemExit("Build at least 5 Kepler error profiles before training.")
+    if len(profiles) <= N_HOLDOUT:
+        raise SystemExit(
+            f"Build more than {N_HOLDOUT} Kepler error profiles before training."
+        )
+    with np.load(DEFAULT_ERROR_LIBRARY) as library:
+        eligible = dr25_in_prior_mask(library)
+    if np.count_nonzero(eligible) < N_HOLDOUT:
+        raise SystemExit(
+            f"Only {np.count_nonzero(eligible)} DR25 targets have best-fit b, "
+            f"duration, and rp/rs within the NPE prior; need {N_HOLDOUT}."
+        )
     order = np.random.default_rng(SEED).permutation(len(profiles))
-    n_holdout = max(1, len(profiles) // 5)
-    holdout_indices = np.sort(order[:n_holdout])
-    train_indices = np.sort(order[n_holdout:])
+    holdout_indices = np.sort(order[eligible[order]][:N_HOLDOUT])
+    train_indices = np.setdiff1d(np.arange(len(profiles)), holdout_indices)
     train_profiles = profiles[train_indices]
     print(
         f"Error profiles: {len(train_profiles)} train, "
@@ -297,6 +307,7 @@ if __name__ == "__main__":
         "error_profile_count": len(profiles),
         "training_profile_count": len(train_profiles),
         "holdout_profile_indices": holdout_indices.tolist(),
+        "holdout_selection": "DR25 best-fit b, duration, and rp/rs in prior",
     })
     print(f"Saved {os.path.abspath(model_fname)}")
 

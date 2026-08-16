@@ -48,12 +48,12 @@ from numpyro.diagnostics import summary as diagnostic_summary
 from npe_wrapper import NPEEstimator
 from transit_sbi import (simulator, simulator_batch, score_compress, t_obs,
                          PRIOR_LOW, PRIOR_HIGH, PARAM_LABELS, N_OBS,
-                         COMPRESSION_MODES, CORE_MODES)
+                         COMPRESSION_MODES, CORE_MODES, dr25_in_prior_mask)
 
 SEED = 42
 PLOT_DIR = "plots"
 LIBRARY = "data/dr25_dv_library/dr25_dv_sbi_library.npz"
-N_KEPLER = int(os.environ.get("N_KEPLER", "8"))
+N_KEPLER = int(os.environ.get("N_KEPLER", "10"))
 IMPORTANCE_REFINE_VALUE = os.environ.get("NPE_IMPORTANCE_REFINE", "0")
 IMPORTANCE_REFINE = IMPORTANCE_REFINE_VALUE == "1"
 IMPORTANCE_BATCH = int(os.environ.get(
@@ -534,6 +534,11 @@ EXPECTED_SCHEMA = 5 if COMPRESSION in CORE_MODES else 4
 if (COMPRESSION not in COMPRESSION_MODES
         or npe.metadata_.get("schema_version") != EXPECTED_SCHEMA):
     sys.exit("This model uses older preprocessing; retrain it.")
+model_low = np.asarray(npe.metadata_.get("prior_low", []), dtype=float)
+model_high = np.asarray(npe.metadata_.get("prior_high", []), dtype=float)
+if (not np.array_equal(model_low, LOW)
+        or not np.array_equal(model_high, HIGH)):
+    sys.exit("The model prior differs from the current simulator; retrain it.")
 TARGET_LABELS = list(npe.metadata_.get("target_labels", PARAM_LABELS))
 TARGET_INDICES = list(npe.metadata_.get(
     "target_indices", range(len(PARAM_LABELS))
@@ -571,6 +576,10 @@ if len(holdout) == 0:
 if (len(np.unique(holdout)) != len(holdout)
         or np.any((holdout < 0) | (holdout >= len(lib["flux_err"])))):
     sys.exit("The model has invalid held-out profile indices; retrain it.")
+in_prior = dr25_in_prior_mask(lib)
+if not np.all(in_prior[holdout]):
+    bad = ", ".join(map(str, lib["name"][holdout[~in_prior[holdout]]]))
+    sys.exit(f"Held-out DR25 targets outside the model prior: {bad}")
 ranked = holdout[np.argsort(lib["catalog_model_snr"][holdout])]
 n_kepler = min(N_KEPLER, len(ranked))
 chosen = (ranked[-1:] if n_kepler == 1 else

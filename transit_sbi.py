@@ -115,6 +115,22 @@ def load_flux_err_profiles(path=DEFAULT_ERROR_LIBRARY):
     return flux_err
 
 
+def dr25_in_prior_mask(library):
+    """Return TCEs whose DR25 best-fit transit parameters lie in-prior."""
+    values = np.column_stack([
+        library["catalog_impact"],
+        library["catalog_duration_hours"] / 24.0,
+        library["catalog_radius_ratio"],
+    ])
+    low = np.asarray(PRIOR_LOW[:3])
+    high = np.asarray(PRIOR_HIGH[:3])
+    return (
+        np.all(np.isfinite(values), axis=1)
+        & np.all(values >= low, axis=1)
+        & np.all(values <= high, axis=1)
+    )
+
+
 def _domain_randomized_observation(model_flux, theta, flux_err):
     """Add moderate unmodelled systematics to otherwise Gaussian curves.
 

@@ -60,6 +60,8 @@ SELECT_COLUMNS = [
     "tce_time0bk",
     "tce_duration",
     "tce_depth",
+    "tce_ror",
+    "tce_impact",
     "tce_model_snr",
 ]
 KOI_SELECT_COLUMNS = [
@@ -87,6 +89,8 @@ class TCERecord:
     epoch_bkjd: float
     duration_hours: float
     depth_ppm: float
+    radius_ratio: float
+    impact: float
     model_snr: float
 
     @property
@@ -463,6 +467,8 @@ def fetch_tce_catalog(args: argparse.Namespace) -> list[TCERecord]:
                 epoch_bkjd=parse_float(row["tce_time0bk"]),
                 duration_hours=parse_float(row["tce_duration"]),
                 depth_ppm=parse_float(row["tce_depth"]),
+                radius_ratio=parse_float(row["tce_ror"]),
+                impact=parse_float(row["tce_impact"]),
                 model_snr=parse_float(row["tce_model_snr"]),
             )
         except (KeyError, ValueError):
@@ -550,6 +556,8 @@ def write_selected_catalog(path: Path, records: list[TCERecord]) -> None:
         "epoch_bkjd",
         "duration_hours",
         "depth_ppm",
+        "radius_ratio",
+        "impact",
         "model_snr",
         "dv_filename",
         "dv_url",
@@ -567,6 +575,8 @@ def write_selected_catalog(path: Path, records: list[TCERecord]) -> None:
                     "epoch_bkjd": record.epoch_bkjd,
                     "duration_hours": record.duration_hours,
                     "depth_ppm": record.depth_ppm,
+                    "radius_ratio": record.radius_ratio,
+                    "impact": record.impact,
                     "model_snr": record.model_snr,
                     "dv_filename": record.dv_filename,
                     "dv_url": record.dv_url,
@@ -1074,6 +1084,8 @@ def manifest_row(
         "catalog_epoch_bkjd": record.epoch_bkjd,
         "catalog_duration_hours": record.duration_hours,
         "catalog_depth_ppm": record.depth_ppm,
+        "catalog_radius_ratio": record.radius_ratio,
+        "catalog_impact": record.impact,
         "catalog_model_snr": record.model_snr,
         "dv_tce_name": "",
         "dv_period_days": "",
@@ -1187,6 +1199,8 @@ def write_npz_library(path: Path, successes: list[tuple[TCERecord, dict, dict]])
         catalog_epoch_bkjd=np.array([record.epoch_bkjd for record in records]),
         catalog_duration_hours=np.array([record.duration_hours for record in records]),
         catalog_depth_ppm=np.array([record.depth_ppm for record in records]),
+        catalog_radius_ratio=np.array([record.radius_ratio for record in records]),
+        catalog_impact=np.array([record.impact for record in records]),
         catalog_model_snr=np.array([record.model_snr for record in records]),
         dv_period_days=np.array([dv["period_days"] for dv in dv_curves]),
         dv_epoch_bkjd=np.array([dv["epoch_bkjd"] for dv in dv_curves]),

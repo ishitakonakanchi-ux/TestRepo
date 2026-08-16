@@ -122,8 +122,9 @@ Kepler fluxes are not training data. Each simulation geometrically mixes two
 per-bin `flux_err` profiles from the DR25 library and adds independent noise
 with `sigma_i^2 = flux_err_i^2 + jitter^2`. Jitter is sampled uniformly in
 log10 space so low-noise examples are not overwhelmed by very large jitter.
-Eighty per cent of the empirical profiles are used for training and 20% are
-reserved for PIT diagnostics.
+All other empirical profiles are used for training. Ten DR25 targets whose
+reported best-fit impact parameter, duration, and radius ratio lie inside the
+NPE prior are reserved for validation.
 
 The `weighted` compressor contains the weighted approximate MLE, fitted
 log10 jitter, and weighted Fisher widths (13 values). The `hybrid` compressor
@@ -164,7 +165,7 @@ WEIGHTS=weights/npe_robust_<timestamp>.pkl ./run_pipeline.sh refine
 This loads the trained model and:
 - Compares NPE posteriors for two synthetic observations
 - Validates against MCMC (NumPyro NUTS)
-- Compares NPE and MCMC on four held-out real Kepler targets by default
+- Compares NPE and MCMC on ten in-prior held-out Kepler targets by default
 - Reports compression, NPE, and MCMC runtimes and the end-to-end speed-up
 
 Corner plots are saved to `plots/<mode>_*.png`. Run `python pit_plot.py` for

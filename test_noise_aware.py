@@ -7,12 +7,19 @@ import numpy as np
 import npe_wrapper
 from npe_wrapper import NPEEstimator
 from transit_sbi import (N_OBS, enable_x64, score_compress, simulate_compressed,
-                         simulate_dataset, simulator,
+                         simulate_dataset, simulator, dr25_in_prior_mask,
                          _domain_randomized_observation)
 
 
 def main():
     np.random.seed(0)
+    catalog = {
+        "catalog_impact": np.array([0.5, 0.5]),
+        "catalog_duration_hours": np.array([4.0, 9.0]),
+        "catalog_radius_ratio": np.array([0.1, 0.1]),
+    }
+    assert np.array_equal(dr25_in_prior_mask(catalog), [True, False])
+
     profiles = np.vstack([
         np.linspace(1e-5, 1e-3, N_OBS),
         np.linspace(1e-3, 1e-5, N_OBS),

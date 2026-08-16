@@ -32,7 +32,7 @@ MAX_TARGETS=${MAX_TARGETS:-50}
 COMPRESSION=${COMPRESSION:-robust}
 WEIGHTS=${WEIGHTS:-}
 PIT_NOISE_MODEL=${PIT_NOISE_MODEL:-native}
-N_KEPLER=${N_KEPLER:-4}
+N_KEPLER=${N_KEPLER:-10}
 NPE_IMPORTANCE_REFINE=${NPE_IMPORTANCE_REFINE:-0}
 export COMPRESSION N_KEPLER
 
@@ -65,7 +65,7 @@ Env:
                 (default robust)
   WEIGHTS       exact model path for apply/refine/pit; otherwise the newest
                 compatible COMPRESSION model is selected
-  N_KEPLER      held-out targets spanning S/N for `apply`/`refine` (default 4)
+  N_KEPLER      held-out targets spanning S/N for `apply`/`refine` (default 10)
   PIT_NOISE_MODEL native, white, or domain for `pit` (default native)
   NPE_DEVICE    torch device for `train`: cpu, mps, or cuda (default cpu)
   NPE_CPU_THREADS CPU helper threads with CUDA: 1 or 2 (default 2)
